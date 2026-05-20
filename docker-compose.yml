@@ -1,0 +1,21 @@
+services:
+  mood_tracker_bot:
+    image: ghcr.io/watermellon2018/mood_tracker_bot:${BOT_TAG:-latest}
+    container_name: mood_tracker_bot
+    restart: always
+    env_file:
+      - .env
+    networks:
+      - postgres_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      logging: "promtail"
+
+networks:
+  postgres_net:
+    external: true

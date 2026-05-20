@@ -1,0 +1,142 @@
+name: Deploy to Local Server
+
+permissions:
+  contents: read
+  packages: write
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate unique tag
+        id: tags
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          echo "tag=${TIMESTAMP}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/mood_tracker_bot:${{ steps.tags.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/mood_tracker_bot:latest
+
+      - name: Set environment file
+        run: |
+          echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" > .env
+          echo "POSTGRES_DB=${{ secrets.POSTGRES_DB }}" >> .env
+          echo "POSTGRES_USER=${{ secrets.POSTGRES_USER }}" >> .env
+          echo "POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}" >> .env
+          echo "POSTGRES_HOST=${{ secrets.POSTGRES_HOST }}" >> .env
+          echo "POSTGRES_PORT=${{ secrets.POSTGRES_PORT }}" >> .env
+          echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
+          echo "DEFAULT_TIMEZONE=${{ secrets.DEFAULT_TIMEZONE }}" >> .env
+          echo "LOG_LEVEL=${{ secrets.LOG_LEVEL }}" >> .env
+
+      - name: Save current version for rollback
+        id: save_current
+        run: |
+          mkdir -p /opt/mood_tracker_bot
+          if [ -f /opt/mood_tracker_bot/current_version ]; then
+            cp /opt/mood_tracker_bot/current_version /opt/mood_tracker_bot/previous_version
+          fi
+
+      - name: Deploy new version
+        run: |
+          export BOT_TAG=${{ steps.tags.outputs.tag }}
+          docker compose pull mood_tracker_bot
+          docker compose up -d --no-deps mood_tracker_bot
+
+      - name: Wait for health check
+        run: |
+          echo "Waiting for container to be healthy..."
+          timeout=120
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            if docker inspect mood_tracker_bot --format='{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
+              echo "Container is healthy!"
+              exit 0
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+            echo "Waiting... (${elapsed}s/${timeout}s)"
+          done
+          echo "Health check timeout!"
+          exit 1
+
+      - name: Verify deployment
+        run: |
+          if ! docker ps | grep -q mood_tracker_bot; then
+            echo "Container is not running!"
+            docker logs mood_tracker_bot --tail 50 || true
+            exit 1
+          fi
+
+          STATUS=$(docker inspect mood_tracker_bot --format='{{.State.Status}}')
+          if [ "$STATUS" != "running" ]; then
+            echo "Container status is: $STATUS (expected: running)"
+            docker logs mood_tracker_bot --tail 50 || true
+            exit 1
+          fi
+
+          echo "Recent logs:"
+          docker logs mood_tracker_bot --tail 20
+
+          EXIT_CODE=$(docker inspect mood_tracker_bot --format='{{.State.ExitCode}}')
+          if [ "$EXIT_CODE" != "0" ] && [ "$EXIT_CODE" != "<no value>" ]; then
+            echo "Warning: Container exit code is $EXIT_CODE"
+          fi
+
+          echo "Deployment verified successfully!"
+
+      - name: Save new current version
+        if: success()
+        run: |
+          echo "${{ steps.tags.outputs.tag }}" > /opt/mood_tracker_bot/current_version
+          echo "Current version updated"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          if [ -f /opt/mood_tracker_bot/previous_version ]; then
+            export BOT_TAG=$(cat /opt/mood_tracker_bot/previous_version)
+          else
+            echo "No previous version to rollback to. Stopping container."
+            docker compose stop mood_tracker_bot || true
+            exit 1
+          fi
+
+          echo "Rolling back to $BOT_TAG"
+          docker compose pull mood_tracker_bot
+          docker compose up -d --no-deps mood_tracker_bot
+          sleep 10
+          if docker ps | grep -q mood_tracker_bot; then
+            echo "Rollback verified - container is running"
+          else
+            echo "Rollback failed - container is not running"
+            exit 1
+          fi
+          echo "Rollback completed to: ${BOT_TAG}"
