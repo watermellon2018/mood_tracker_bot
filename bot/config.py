@@ -14,6 +14,7 @@ class Config:
     )
     DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
 
     PENDING_EXPIRE_HOURS: int = 6
 

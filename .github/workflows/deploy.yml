@@ -55,6 +55,7 @@ jobs:
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
           echo "DEFAULT_TIMEZONE=${{ secrets.DEFAULT_TIMEZONE }}" >> .env
           echo "LOG_LEVEL=${{ secrets.LOG_LEVEL }}" >> .env
+          echo "HTTPS_PROXY=${{ secrets.HTTPS_PROXY }}" >> .env
 
       - name: Save current version for rollback
         id: save_current

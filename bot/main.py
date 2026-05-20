@@ -70,12 +70,12 @@ def main() -> None:
     if not config.BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не задан в окружении")
 
-    application = (
-        Application.builder()
-        .token(config.BOT_TOKEN)
-        .post_init(_post_init)
-        .build()
-    )
+    builder = Application.builder().token(config.BOT_TOKEN).post_init(_post_init)
+    if config.HTTPS_PROXY:
+        # PTB 21 принимает proxy на отдельных Request-объектах для get/post.
+        logger.info("Используется HTTPS-прокси для Telegram API")
+        builder = builder.proxy(config.HTTPS_PROXY).get_updates_proxy(config.HTTPS_PROXY)
+    application = builder.build()
 
     # Опрос — ставим первым, чтобы перехватывать survey:start раньше прочих.
     application.add_handler(build_survey_conversation())
