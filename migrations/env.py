@@ -8,7 +8,9 @@ from bot.database import Base
 import bot.models  # noqa: F401 - ensure models are imported for metadata
 
 config = context.config
-config.set_main_option("sqlalchemy.url", app_config.DATABASE_URL)
+# configparser трактует % как маркер интерполяции. Если в пароле есть %,
+# подставленная как есть строка падает с ValueError. Экранируем.
+config.set_main_option("sqlalchemy.url", app_config.DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
