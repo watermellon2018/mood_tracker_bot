@@ -40,7 +40,10 @@ def _to_local(dt: datetime, tz) -> datetime:
 
 
 def build_excel(
-    entries: Sequence[SurveyEntry], period_label: str, user_timezone: str
+    entries: Sequence[SurveyEntry],
+    period_label: str,
+    user_timezone: str,
+    optional_answers: list[dict] | None = None,
 ) -> str:
     f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
     f.close()
@@ -60,8 +63,11 @@ def build_excel(
             "Настроение": e.mood if e.sleep_type != "additional" else "",
             "Тревога": e.anxiety if e.sleep_type != "additional" else "",
             "Энергия": e.energy if e.sleep_type != "additional" else "",
-            "Раздражительность": e.irritability if e.sleep_type != "additional" else "",
-            "Импульсивность": e.impulsivity if e.sleep_type != "additional" else "",
+            # irritability/impulsivity теперь опциональные — для новых записей
+            # значения хранятся в Survey_answers и попадают на лист
+            # "Опциональные ответы". В колонке остаётся пустая ячейка.
+            "Раздражительность": e.irritability if e.irritability is not None else "",
+            "Импульсивность": e.impulsivity if e.impulsivity is not None else "",
             "Длительность сна": SLEEP_DURATION_LABELS.get(
                 e.sleep_duration_category, e.sleep_duration_category
             ),
@@ -122,6 +128,10 @@ def build_excel(
         days_no_med = sum(
             1 for vs in med_by_day.values() if all(x.medication_taken == "no" for x in vs)
         )
+        # irritability/impulsivity теперь опциональные — учитываем только заполненные
+        irrit_vals = [e.irritability for e in scale_entries if e.irritability is not None]
+        impuls_vals = [e.impulsivity for e in scale_entries if e.impulsivity is not None]
+
         summary = {
             "Период": period_label,
             "Количество записей": len(entries),
@@ -134,17 +144,17 @@ def build_excel(
             "Средняя энергия": round(
                 sum(e.energy for e in scale_entries) / len(scale_entries), 2
             ),
-            "Средняя раздражительность": round(
-                sum(e.irritability for e in scale_entries) / len(scale_entries), 2
-            ),
-            "Средняя импульсивность": round(
-                sum(e.impulsivity for e in scale_entries) / len(scale_entries), 2
-            ),
+        }
+        if irrit_vals:
+            summary["Средняя раздражительность"] = round(sum(irrit_vals) / len(irrit_vals), 2)
+        if impuls_vals:
+            summary["Средняя импульсивность"] = round(sum(impuls_vals) / len(impuls_vals), 2)
+        summary.update({
             "Дней с настроением 8+": days_high_mood,
             "Дней с тревогой 4+": days_high_anx,
             "Дней со сном меньше 5 часов": days_low_sleep,
             "Дней без приема лекарств": days_no_med,
-        }
+        })
     else:
         summary = {"Период": period_label, "Количество записей": 0}
     df_summary = pd.DataFrame([summary]).T.reset_index()
@@ -186,11 +196,35 @@ def build_excel(
         )
     df_daily = pd.DataFrame(daily_rows)
 
+    # Лист "Опциональные ответы": long-format со всеми ответами на дополнительные
+    # вопросы. Пустой DataFrame не пишется как лист, если строк нет — не страшно.
+    df_optional = None
+    if optional_answers:
+        # Импорт здесь, чтобы не создавать циклов и не подгружать константы зря.
+        from bot.constants_questions import QUESTION_DEFINITIONS
+
+        opt_rows = []
+        for row in optional_answers:
+            code = row["question_code"]
+            title = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
+            opt_rows.append({
+                "Дата и время": _to_local(row["created_at"], tz),
+                "Вопрос (код)": code,
+                "Вопрос": title.rstrip("?"),
+                "Ответ": row["answer_value"],
+                "Ответ (число 0-4)": row["answer_numeric"],
+            })
+        df_optional = pd.DataFrame(opt_rows)
+
     try:
         with pd.ExcelWriter(f.name, engine="openpyxl") as writer:
             df_data.to_excel(writer, sheet_name="Данные", index=False)
             df_summary.to_excel(writer, sheet_name="Сводка", index=False)
             df_daily.to_excel(writer, sheet_name="Дневная статистика", index=False)
+            if df_optional is not None and not df_optional.empty:
+                df_optional.to_excel(
+                    writer, sheet_name="Опциональные ответы", index=False
+                )
     except Exception:
         logger.exception("Ошибка генерации Excel")
         raise

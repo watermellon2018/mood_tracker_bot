@@ -99,3 +99,15 @@ def start_survey_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("Заполнить опрос", callback_data="survey:start")]]
     )
+
+
+def optional_question_keyboard(options: list[str]) -> InlineKeyboardMarkup:
+    """5 кнопок по числу вариантов опционального вопроса. callback_data — индекс 0..N-1.
+
+    Кнопки идут по одной в ряд — подписи у некоторых вопросов длинные.
+    """
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"opt:{idx}")]
+        for idx, label in enumerate(options)
+    ]
+    return InlineKeyboardMarkup(rows)

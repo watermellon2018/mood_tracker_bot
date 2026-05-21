@@ -37,6 +37,7 @@ from bot.keyboards.main_menu import (
 )
 from bot.handlers.add_sleep import build_add_sleep_conversation
 from bot.handlers.edit_meds import build_edit_meds_conversation
+from bot.handlers.question_settings import build_qs_handler
 from bot.handlers.stats import stats_handlers
 from bot.handlers.survey import (
     build_survey_conversation,
@@ -119,6 +120,9 @@ def main() -> None:
 
     # Выбор часового пояса (onboarding + смена из настроек).
     application.add_handler(build_timezone_handler())
+
+    # Настройки вопросов опроса (этап 1: UI настройки, опрос пока не меняется).
+    application.add_handler(build_qs_handler())
 
     # Статистика и экспорт
     for h in stats_handlers():

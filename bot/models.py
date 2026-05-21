@@ -1,5 +1,7 @@
 from datetime import date, datetime, time
 
+from decimal import Decimal
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -9,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     Time,
@@ -96,19 +99,13 @@ class SurveyEntry(Base):
         CheckConstraint("mood BETWEEN 0 AND 10", name="ck_mood_range"),
         CheckConstraint("anxiety BETWEEN 0 AND 5", name="ck_anxiety_range"),
         CheckConstraint("energy BETWEEN 0 AND 5", name="ck_energy_range"),
-        CheckConstraint(
-            "irritability BETWEEN 0 AND 5", name="ck_irritability_range"
-        ),
-        CheckConstraint(
-            "impulsivity BETWEEN 0 AND 5", name="ck_impulsivity_range"
-        ),
+        # irritability/impulsivity: исторические колонки, теперь NULL-able.
+        # Эти вопросы вынесены в опциональные (QUESTION_DEFINITIONS) и пишутся
+        # в survey_answers. CHECK-диапазон не сохраняется, чтобы не мешал NULL.
         CheckConstraint(
             "sleep_type IN ('main', 'additional', 'none')", name="ck_sleep_type"
         ),
         Index("ix_survey_entries_local_date", "user_id", "local_date"),
-        # Уникальные индексы создаются в миграции (CREATE UNIQUE INDEX ... WHERE ...).
-        # SQLAlchemy не умеет частичные индексы декларативно для всех версий — поэтому
-        # они описаны только в миграции 0003.
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -129,8 +126,8 @@ class SurveyEntry(Base):
     mood: Mapped[int] = mapped_column(Integer, nullable=False)
     anxiety: Mapped[int] = mapped_column(Integer, nullable=False)
     energy: Mapped[int] = mapped_column(Integer, nullable=False)
-    irritability: Mapped[int] = mapped_column(Integer, nullable=False)
-    impulsivity: Mapped[int] = mapped_column(Integer, nullable=False)
+    irritability: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    impulsivity: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     sleep_duration_category: Mapped[str] = mapped_column(String(16), nullable=False)
     sleep_quality: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -178,3 +175,87 @@ class PendingSurvey(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="pendings")
+
+
+class QuestionCatalog(Base):
+    """Каталог вопросов опроса. Базовые вопросы помечены is_required=True
+    и не могут быть отключены пользователем."""
+
+    __tablename__ = "question_catalog"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('base','depression','anxiety','hypomania','lifestyle','health')",
+            name="ck_qc_category",
+        ),
+    )
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_default_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class UserQuestionSettings(Base):
+    """Включенные пользователем опциональные вопросы. Базовые сюда не пишутся."""
+
+    __tablename__ = "user_question_settings"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    question_code: Mapped[str] = mapped_column(
+        ForeignKey("question_catalog.code", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class SurveyAnswer(Base):
+    """EAV-таблица для ответов на опциональные вопросы. К каждой survey_entries
+    может относиться 0..N ответов. Базовые вопросы (mood/anxiety/...) хранятся
+    в колонках SurveyEntry — для них SurveyAnswer не создаётся."""
+
+    __tablename__ = "survey_answers"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    entry_id: Mapped[int] = mapped_column(
+        ForeignKey("survey_entries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    question_code: Mapped[str] = mapped_column(
+        ForeignKey("question_catalog.code", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    answer_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_numeric: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

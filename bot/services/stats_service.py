@@ -9,8 +9,24 @@ from bot.constants import (
     MEDICATION_LABELS,
     SLEEP_DURATION_TO_HOURS,
 )
-from bot.models import SurveyEntry
+from bot.models import SurveyAnswer, SurveyEntry
 from bot.utils.time_utils import get_tz
+
+
+def fetch_optional_answers(
+    session: Session, entry_ids: list[int]
+) -> dict[int, list[SurveyAnswer]]:
+    """Возвращает {entry_id: [SurveyAnswer, ...]} для переданных entry_id.
+    Пустой dict, если entry_ids пуст."""
+    if not entry_ids:
+        return {}
+    rows = session.scalars(
+        select(SurveyAnswer).where(SurveyAnswer.entry_id.in_(entry_ids))
+    ).all()
+    out: dict[int, list[SurveyAnswer]] = {}
+    for a in rows:
+        out.setdefault(a.entry_id, []).append(a)
+    return out
 
 
 def to_local_date(dt: datetime, tz_name: str):
@@ -53,8 +69,10 @@ def build_summary(
     moods = [e.mood for e in entries]
     anxieties = [e.anxiety for e in entries]
     energies = [e.energy for e in entries]
-    irritabilities = [e.irritability for e in entries]
-    impulsivities = [e.impulsivity for e in entries]
+    # irritability/impulsivity теперь NULL-able (опциональные вопросы) —
+    # учитываем только заполненные значения.
+    irritabilities = [e.irritability for e in entries if e.irritability is not None]
+    impulsivities = [e.impulsivity for e in entries if e.impulsivity is not None]
 
     by_day_mood: dict = {}
     by_day_anxiety: dict = {}
@@ -92,8 +110,12 @@ def build_summary(
         "",
         f"Средняя тревога: {_avg(anxieties)}",
         f"Средняя энергия: {_avg(energies)}",
-        f"Средняя раздражительность: {_avg(irritabilities)}",
-        f"Средняя импульсивность: {_avg(impulsivities)}",
+    ]
+    if irritabilities:
+        lines.append(f"Средняя раздражительность: {_avg(irritabilities)}")
+    if impulsivities:
+        lines.append(f"Средняя импульсивность: {_avg(impulsivities)}")
+    lines.extend([
         "",
         f"Дней с настроением 8+: {days_high_mood}",
         f"Дней с тревогой 4+: {days_high_anx}",
@@ -101,7 +123,7 @@ def build_summary(
         f'Дней с отметкой "мало сна, но чувствую себя отлично": {days_little_sleep_good}',
         "",
         "Прием лекарств:",
-    ]
+    ])
     for key, label in MEDICATION_LABELS.items():
         cnt = med_counter.get(key, 0)
         if cnt:

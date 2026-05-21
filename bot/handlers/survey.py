@@ -24,15 +24,21 @@ from bot.constants import (
     SOURCE_REMINDER,
     SOURCE_SCHEDULED,
 )
+from bot.constants_questions import (
+    CRISIS_MESSAGE,
+    OPTIONAL_QUESTION_ORDER,
+    QUESTION_DEFINITIONS,
+    SUICIDAL_HIGH_RISK_INDEX,
+    options_for,
+)
 from bot.database import session_scope
 from bot.keyboards.survey_keyboards import (
     anxiety_keyboard,
     comment_skip_keyboard,
     energy_keyboard,
-    impulsivity_keyboard,
-    irritability_keyboard,
     medication_keyboard,
     mood_keyboard,
+    optional_question_keyboard,
     sleep_duration_keyboard,
     sleep_problems_keyboard,
     sleep_quality_keyboard,
@@ -40,15 +46,17 @@ from bot.keyboards.survey_keyboards import (
 )
 from sqlalchemy.exc import IntegrityError
 
-from bot.services import reminder_service, survey_service
+from bot.services import (
+    question_settings_service,
+    reminder_service,
+    survey_service,
+)
 from bot.texts import (
     ERR_COMMENT_TOO_LONG,
     ERR_DB,
     Q_ANXIETY,
     Q_COMMENT,
     Q_ENERGY,
-    Q_IMPULSIVITY,
-    Q_IRRITABILITY,
     Q_MEDICATION,
     Q_MOOD,
     Q_SLEEP_DURATION,
@@ -68,14 +76,13 @@ logger = logging.getLogger(__name__)
     MOOD,
     ANXIETY,
     ENERGY,
-    IRRITABILITY,
-    IMPULSIVITY,
     SLEEP_DURATION,
     SLEEP_QUALITY,
     SLEEP_PROBLEMS,
     MEDICATION,
+    OPTIONAL_Q,
     COMMENT,
-) = range(10)
+) = range(9)
 
 
 # ---------- helpers ----------
@@ -84,15 +91,23 @@ def _is_active_survey(context: ContextTypes.DEFAULT_TYPE) -> bool:
     return bool(context.user_data.get("survey"))
 
 
+# Коды, у которых есть отдельный базовый шаг в опросе — их не нужно дублировать
+# через опциональный механизм, даже если пользователь включил их в настройках.
+# irritability/impulsivity больше не имеют базовых шагов — задаются как опциональные.
+_HANDLED_AS_BASE = {"medications"}
+
+
 def _init_survey(
     context: ContextTypes.DEFAULT_TYPE, source: str, tg_id: int
 ) -> None:
-    """Инициализирует state опроса. Определяет, заполнены ли сон и лекарства
-    за локальную дату пользователя, и кладёт флаги в state — они нужны для
-    условного скипа блоков и для save_entry."""
+    """Инициализирует state опроса. Определяет:
+    - заполнены ли сон и лекарства за локальную дату (для скипа базовых блоков);
+    - список включенных опциональных вопросов и порядок их прохождения.
+    """
     has_sleep = False
     has_med = False
     local_date = None
+    optional_codes: list[str] = []
     try:
         with session_scope() as session:
             user = survey_service.get_or_create_user(
@@ -105,6 +120,14 @@ def _init_survey(
             has_med = survey_service.has_medication_for_date(
                 session, user.id, local_date
             )
+            enabled = question_settings_service.enabled_optional_codes(
+                session, user.id
+            )
+            # фильтруем и упорядочиваем
+            optional_codes = [
+                c for c in OPTIONAL_QUESTION_ORDER
+                if c in enabled and c not in _HANDLED_AS_BASE
+            ]
     except Exception:
         logger.exception("Не удалось определить состояние блоков сна/лекарств")
 
@@ -114,7 +137,16 @@ def _init_survey(
         "skip_sleep": has_sleep,
         "skip_medication": has_med,
         "local_date": local_date,
+        "optional_codes": optional_codes,
+        "optional_idx": 0,
+        "optional_answers": [],  # list[dict(code, text, index)]
+        "high_risk_triggered": False,
     }
+    if optional_codes:
+        logger.info(
+            "Опрос tg=%s: подключены опциональные вопросы (%d шт): %s",
+            tg_id, len(optional_codes), ", ".join(optional_codes),
+        )
 
 
 async def _send_question(update: Update, text: str, markup) -> None:
@@ -216,38 +248,13 @@ async def energy_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     value = int(query.data.split(":")[1])
     context.user_data["survey"]["energy"] = value
     await query.edit_message_text(f"{Q_ENERGY}\n\nВыбрано: {value}")
-    await query.message.reply_text(
-        Q_IRRITABILITY, reply_markup=irritability_keyboard()
-    )
-    return IRRITABILITY
+    # irritability/impulsivity — теперь опциональные (см. QUESTION_DEFINITIONS).
+    # После базовых шкал сразу идём к блоку сна (или к опциональным/комменту,
+    # если сон/лекарства уже заполнены за сегодня).
+    return await _after_base_scales(update, context)
 
 
-async def irritability_step(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    query = update.callback_query
-    await query.answer()
-    value = int(query.data.split(":")[1])
-    context.user_data["survey"]["irritability"] = value
-    await query.edit_message_text(f"{Q_IRRITABILITY}\n\nВыбрано: {value}")
-    await query.message.reply_text(
-        Q_IMPULSIVITY, reply_markup=impulsivity_keyboard()
-    )
-    return IMPULSIVITY
-
-
-async def impulsivity_step(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    query = update.callback_query
-    await query.answer()
-    value = int(query.data.split(":")[1])
-    context.user_data["survey"]["impulsivity"] = value
-    await query.edit_message_text(f"{Q_IMPULSIVITY}\n\nВыбрано: {value}")
-    return await _after_impulsivity(update, context)
-
-
-async def _after_impulsivity(
+async def _after_base_scales(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Решает, какой следующий шаг показать после блока шкал — с учётом скипов."""
@@ -268,7 +275,7 @@ async def _after_impulsivity(
 async def _ask_medication_or_skip(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Запрашивает блок лекарств или скипает его, переходя к комментарию."""
+    """Запрашивает блок лекарств или скипает его, переходя дальше."""
     survey = context.user_data["survey"]
     target = update.callback_query.message if update.callback_query else update.message
 
@@ -277,11 +284,81 @@ async def _ask_medication_or_skip(
             "Скипаем блок лекарств (уже есть запись за %s)", survey.get("local_date")
         )
         await target.reply_text(SKIP_MEDICATION_TODAY)
-        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
-        return COMMENT
+        return await _next_optional_or_comment(update, context)
 
     await target.reply_text(Q_MEDICATION, reply_markup=medication_keyboard())
     return MEDICATION
+
+
+async def _next_optional_or_comment(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """После базового блока — задаём следующий опциональный или переходим к комментарию."""
+    survey = context.user_data["survey"]
+    target = update.callback_query.message if update.callback_query else update.message
+
+    codes: list[str] = survey.get("optional_codes", [])
+    idx: int = survey.get("optional_idx", 0)
+
+    if idx >= len(codes):
+        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        return COMMENT
+
+    code = codes[idx]
+    title = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
+    question_text, options = options_for(code, title)
+    await target.reply_text(
+        question_text, reply_markup=optional_question_keyboard(options)
+    )
+    return OPTIONAL_Q
+
+
+async def optional_question_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Обработка ответа на опциональный вопрос. Сохраняет в state и переходит дальше."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        choice_idx = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        return OPTIONAL_Q
+
+    survey = context.user_data["survey"]
+    idx: int = survey.get("optional_idx", 0)
+    codes: list[str] = survey.get("optional_codes", [])
+    if idx >= len(codes):
+        # Из-за гонок — просто переходим к комментарию.
+        await query.message.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        return COMMENT
+
+    code = codes[idx]
+    _, options = options_for(code)
+    if not (0 <= choice_idx < len(options)):
+        return OPTIONAL_Q
+    answer_text = options[choice_idx]
+
+    survey["optional_answers"].append(
+        {"code": code, "text": answer_text, "index": choice_idx}
+    )
+    survey["optional_idx"] = idx + 1
+
+    # Подсветим выбранный вариант в исходном сообщении.
+    question_text = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
+    try:
+        await query.edit_message_text(f"{question_text}\n\nВыбрано: {answer_text}")
+    except Exception:
+        pass
+
+    # Hook: suicidal high-risk — поставим флаг, сообщение покажем после finish.
+    if code == "suicidal_thoughts" and choice_idx == SUICIDAL_HIGH_RISK_INDEX:
+        survey["high_risk_triggered"] = True
+        logger.warning(
+            "Suicidal high-risk ответ tg=%s — будет показано кризисное сообщение",
+            update.effective_user.id,
+        )
+
+    return await _next_optional_or_comment(update, context)
 
 
 async def sleep_duration_step(
@@ -357,8 +434,7 @@ async def medication_step(
     await query.edit_message_text(
         f"{Q_MEDICATION}\n\nВыбрано: {MEDICATION_LABELS.get(key, key)}"
     )
-    await query.message.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
-    return COMMENT
+    return await _next_optional_or_comment(update, context)
 
 
 async def comment_text_step(
@@ -400,6 +476,11 @@ async def _finish_survey(
     skip_sleep = data.pop("skip_sleep", False)
     skip_medication = data.pop("skip_medication", False)
     local_date = data.pop("local_date", None)
+    optional_answers = data.pop("optional_answers", [])
+    high_risk_triggered = data.pop("high_risk_triggered", False)
+    # Эти ключи уже не нужны после извлечения ответов.
+    data.pop("optional_codes", None)
+    data.pop("optional_idx", None)
 
     # Маркируем тип записи. Если сон скипнули — sleep_type='none', поля сна
     # фактически отсутствуют (save_entry проставит дефолты 'skipped').
@@ -435,7 +516,15 @@ async def _finish_survey(
                 logger.info("Гонка: лекарства уже есть, пишем medication_filled=false")
                 data["medication_filled"] = False
                 data["medication_taken"] = "not_applicable"
-            survey_service.save_entry(session, user.id, data, local_date)
+            entry = survey_service.save_entry(session, user.id, data, local_date)
+            for ans in optional_answers:
+                survey_service.save_optional_answer(
+                    session,
+                    entry_id=entry.id,
+                    question_code=ans["code"],
+                    answer_text=ans["text"],
+                    answer_index=ans["index"],
+                )
             if pending is not None:
                 survey_service.mark_pending_completed(session, user.id)
     except IntegrityError:
@@ -466,8 +555,6 @@ async def _finish_survey(
         f"Настроение: {data['mood']}",
         f"Тревога: {data['anxiety']}",
         f"Энергия: {data['energy']}",
-        f"Раздражительность: {data['irritability']}",
-        f"Импульсивность: {data['impulsivity']}",
     ]
     if not skip_sleep:
         summary_lines.append(
@@ -478,8 +565,19 @@ async def _finish_survey(
         summary_lines.append(
             f"Лекарства: {MEDICATION_LABELS.get(data['medication_taken'], '')}"
         )
+    if optional_answers:
+        summary_lines.append("")
+        summary_lines.append("Дополнительно:")
+        for ans in optional_answers:
+            title = QUESTION_DEFINITIONS.get(ans["code"], {}).get(
+                "question_text", ans["code"]
+            )
+            summary_lines.append(f"• {title.rstrip('?')}: {ans['text']}")
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text("\n".join(summary_lines))
+
+    if high_risk_triggered:
+        await target.reply_text(CRISIS_MESSAGE)
 
     context.user_data.pop("survey", None)
     return ConversationHandler.END
@@ -504,12 +602,6 @@ def build_survey_conversation() -> ConversationHandler:
             MOOD: [CallbackQueryHandler(mood_step, pattern=r"^mood:\d+$")],
             ANXIETY: [CallbackQueryHandler(anxiety_step, pattern=r"^anxiety:\d+$")],
             ENERGY: [CallbackQueryHandler(energy_step, pattern=r"^energy:\d+$")],
-            IRRITABILITY: [
-                CallbackQueryHandler(irritability_step, pattern=r"^irritability:\d+$")
-            ],
-            IMPULSIVITY: [
-                CallbackQueryHandler(impulsivity_step, pattern=r"^impulsivity:\d+$")
-            ],
             SLEEP_DURATION: [
                 CallbackQueryHandler(sleep_duration_step, pattern=r"^sleep_dur:")
             ],
@@ -521,6 +613,9 @@ def build_survey_conversation() -> ConversationHandler:
             ],
             MEDICATION: [
                 CallbackQueryHandler(medication_step, pattern=r"^med:")
+            ],
+            OPTIONAL_Q: [
+                CallbackQueryHandler(optional_question_step, pattern=r"^opt:\d+$")
             ],
             COMMENT: [
                 CallbackQueryHandler(comment_skip_step, pattern=r"^comment:skip$"),

@@ -46,6 +46,20 @@ async def export_period_callback(
             )
             entries = stats_service.fetch_entries(session, user.id, since)
             user_tz = user.timezone
+            answers_by_entry = stats_service.fetch_optional_answers(
+                session, [e.id for e in entries]
+            )
+            # Сериализуем в простые dict, чтобы не зависеть от сессии.
+            answers_rows = []
+            for e in entries:
+                for a in answers_by_entry.get(e.id, []):
+                    answers_rows.append({
+                        "entry_id": e.id,
+                        "created_at": e.created_at,
+                        "question_code": a.question_code,
+                        "answer_value": a.answer_value,
+                        "answer_numeric": float(a.answer_numeric) if a.answer_numeric is not None else None,
+                    })
     except Exception:
         logger.exception("Ошибка чтения данных для экспорта")
         await query.message.reply_text(ERR_GENERIC)
@@ -56,7 +70,7 @@ async def export_period_callback(
         return
 
     try:
-        path = export_service.build_excel(entries, label, user_tz)
+        path = export_service.build_excel(entries, label, user_tz, answers_rows)
     except Exception:
         logger.exception("Ошибка генерации Excel")
         await query.message.reply_text(ERR_GENERIC)

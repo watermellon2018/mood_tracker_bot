@@ -73,6 +73,8 @@ def _line_chart(
     user_timezone: str,
 ) -> str | None:
     entries = _exclude_additional(entries)
+    # Фильтруем записи, где поле None (опциональные шкалы могут отсутствовать).
+    entries = [e for e in entries if getattr(e, field) is not None]
     if not entries:
         return None
     xs = _xs(entries, user_timezone)

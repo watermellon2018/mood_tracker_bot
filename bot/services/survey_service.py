@@ -10,7 +10,7 @@ from bot.constants import (
     PENDING_STATUS,
     REMINDER_SENT_STATUS,
 )
-from bot.models import PendingSurvey, SurveyEntry, User, UserSettings
+from bot.models import PendingSurvey, SurveyAnswer, SurveyEntry, User, UserSettings
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +124,10 @@ def save_entry(
         mood=data["mood"],
         anxiety=data["anxiety"],
         energy=data["energy"],
-        irritability=data["irritability"],
-        impulsivity=data["impulsivity"],
+        # irritability/impulsivity теперь опциональные и пишутся в survey_answers.
+        # Колонки сохраняются NULL.
+        irritability=data.get("irritability"),
+        impulsivity=data.get("impulsivity"),
         sleep_duration_category=data.get("sleep_duration_category", "skipped"),
         sleep_quality=data.get("sleep_quality", "skipped"),
         hard_to_fall_asleep=data.get("hard_to_fall_asleep", False),
@@ -162,7 +164,8 @@ def save_additional_sleep(
         local_date=local_date,
         sleep_type="additional",
         medication_filled=False,
-        mood=0, anxiety=0, energy=0, irritability=0, impulsivity=0,
+        mood=0, anxiety=0, energy=0,
+        irritability=None, impulsivity=None,
         sleep_duration_category=sleep_duration_category,
         sleep_quality=sleep_quality,
         hard_to_fall_asleep=False,
@@ -180,6 +183,25 @@ def save_additional_sleep(
         "Добавлен дополнительный сон id=%s user_id=%s date=%s", entry.id, user_id, local_date
     )
     return entry
+
+
+def save_optional_answer(
+    session: Session,
+    entry_id: int,
+    question_code: str,
+    answer_text: str,
+    answer_index: int,
+) -> SurveyAnswer:
+    """Записывает ответ на опциональный вопрос в EAV-таблицу."""
+    a = SurveyAnswer(
+        entry_id=entry_id,
+        question_code=question_code,
+        answer_value=answer_text,
+        answer_numeric=answer_index,
+    )
+    session.add(a)
+    session.flush()
+    return a
 
 
 def update_medication(
