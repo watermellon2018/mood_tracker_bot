@@ -38,6 +38,8 @@ from bot.keyboards.survey_keyboards import (
     sleep_quality_keyboard,
     unfinished_survey_keyboard,
 )
+from sqlalchemy.exc import IntegrityError
+
 from bot.services import reminder_service, survey_service
 from bot.texts import (
     ERR_COMMENT_TOO_LONG,
@@ -53,9 +55,12 @@ from bot.texts import (
     Q_SLEEP_PROBLEMS,
     Q_SLEEP_QUALITY,
     SAVED,
+    SKIP_MEDICATION_TODAY,
+    SKIP_SLEEP_TODAY,
     SURVEY_INTRO,
     UNFINISHED_SURVEY,
 )
+from bot.utils.time_utils import user_local_date
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +85,36 @@ def _is_active_survey(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 def _init_survey(
-    context: ContextTypes.DEFAULT_TYPE, source: str
+    context: ContextTypes.DEFAULT_TYPE, source: str, tg_id: int
 ) -> None:
-    context.user_data["survey"] = {"source": source, "sleep_problems": set()}
+    """Инициализирует state опроса. Определяет, заполнены ли сон и лекарства
+    за локальную дату пользователя, и кладёт флаги в state — они нужны для
+    условного скипа блоков и для save_entry."""
+    has_sleep = False
+    has_med = False
+    local_date = None
+    try:
+        with session_scope() as session:
+            user = survey_service.get_or_create_user(
+                session, tg_id, config.DEFAULT_TIMEZONE
+            )
+            local_date = user_local_date(user.timezone)
+            has_sleep = survey_service.has_main_sleep_for_date(
+                session, user.id, local_date
+            )
+            has_med = survey_service.has_medication_for_date(
+                session, user.id, local_date
+            )
+    except Exception:
+        logger.exception("Не удалось определить состояние блоков сна/лекарств")
+
+    context.user_data["survey"] = {
+        "source": source,
+        "sleep_problems": set(),
+        "skip_sleep": has_sleep,
+        "skip_medication": has_med,
+        "local_date": local_date,
+    }
 
 
 async def _send_question(update: Update, text: str, markup) -> None:
@@ -101,7 +133,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             UNFINISHED_SURVEY, reply_markup=unfinished_survey_keyboard()
         )
         return ConversationHandler.END
-    _init_survey(context, SOURCE_MANUAL)
+    _init_survey(context, SOURCE_MANUAL, update.effective_user.id)
     await update.message.reply_text(SURVEY_INTRO)
     await update.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
     return MOOD
@@ -129,7 +161,7 @@ async def survey_start_callback(
                     source = SOURCE_REMINDER
     except Exception:
         logger.exception("Ошибка определения source при запуске опроса")
-    _init_survey(context, source)
+    _init_survey(context, source, update.effective_user.id)
     await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
     return MOOD
 
@@ -151,7 +183,7 @@ async def unfinished_choice_callback(
         return MOOD
     else:
         context.user_data.pop("survey", None)
-        _init_survey(context, SOURCE_MANUAL)
+        _init_survey(context, SOURCE_MANUAL, update.effective_user.id)
         await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
         return MOOD
 
@@ -212,10 +244,44 @@ async def impulsivity_step(
     value = int(query.data.split(":")[1])
     context.user_data["survey"]["impulsivity"] = value
     await query.edit_message_text(f"{Q_IMPULSIVITY}\n\nВыбрано: {value}")
-    await query.message.reply_text(
-        Q_SLEEP_DURATION, reply_markup=sleep_duration_keyboard()
-    )
+    return await _after_impulsivity(update, context)
+
+
+async def _after_impulsivity(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Решает, какой следующий шаг показать после блока шкал — с учётом скипов."""
+    survey = context.user_data["survey"]
+    target = update.callback_query.message if update.callback_query else update.message
+
+    if survey.get("skip_sleep"):
+        logger.info(
+            "Скипаем блок сна (уже есть main за %s)", survey.get("local_date")
+        )
+        await target.reply_text(SKIP_SLEEP_TODAY)
+        return await _ask_medication_or_skip(update, context)
+
+    await target.reply_text(Q_SLEEP_DURATION, reply_markup=sleep_duration_keyboard())
     return SLEEP_DURATION
+
+
+async def _ask_medication_or_skip(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Запрашивает блок лекарств или скипает его, переходя к комментарию."""
+    survey = context.user_data["survey"]
+    target = update.callback_query.message if update.callback_query else update.message
+
+    if survey.get("skip_medication"):
+        logger.info(
+            "Скипаем блок лекарств (уже есть запись за %s)", survey.get("local_date")
+        )
+        await target.reply_text(SKIP_MEDICATION_TODAY)
+        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        return COMMENT
+
+    await target.reply_text(Q_MEDICATION, reply_markup=medication_keyboard())
+    return MEDICATION
 
 
 async def sleep_duration_step(
@@ -261,12 +327,8 @@ async def sleep_problems_step(
 
     if key == "__none__":
         selected.clear()
-        # фиксируем шаг и сразу идем дальше
         await query.edit_message_text(f"{Q_SLEEP_PROBLEMS}\n\nВыбрано: нет")
-        await query.message.reply_text(
-            Q_MEDICATION, reply_markup=medication_keyboard()
-        )
-        return MEDICATION
+        return await _ask_medication_or_skip(update, context)
 
     if key == "__done__":
         if selected:
@@ -274,10 +336,7 @@ async def sleep_problems_step(
         else:
             chosen = "нет"
         await query.edit_message_text(f"{Q_SLEEP_PROBLEMS}\n\nВыбрано: {chosen}")
-        await query.message.reply_text(
-            Q_MEDICATION, reply_markup=medication_keyboard()
-        )
-        return MEDICATION
+        return await _ask_medication_or_skip(update, context)
 
     # toggle
     if key in selected:
@@ -338,6 +397,17 @@ async def _finish_survey(
     ):
         data[key] = key in problems
 
+    skip_sleep = data.pop("skip_sleep", False)
+    skip_medication = data.pop("skip_medication", False)
+    local_date = data.pop("local_date", None)
+
+    # Маркируем тип записи. Если сон скипнули — sleep_type='none', поля сна
+    # фактически отсутствуют (save_entry проставит дефолты 'skipped').
+    # Если лекарства скипнули — medication_filled=false, medication_taken остаётся
+    # 'not_applicable' (save_entry проставит).
+    data["sleep_type"] = "none" if skip_sleep else "main"
+    data["medication_filled"] = not skip_medication
+
     tg_id = update.effective_user.id
 
     try:
@@ -345,11 +415,39 @@ async def _finish_survey(
             user = survey_service.get_or_create_user(
                 session, tg_id, config.DEFAULT_TIMEZONE
             )
+            if local_date is None:
+                local_date = user_local_date(user.timezone)
             pending = survey_service.latest_pending(session, user.id)
             pending_id = pending.id if pending is not None else None
-            survey_service.save_entry(session, user.id, data)
+            # Двойная проверка: между _init_survey и сейчас могла появиться запись
+            # (другой опрос/доп. сон). Если main уже есть — пишем 'none', чтобы не
+            # упасть на уникальном индексе.
+            if data["sleep_type"] == "main" and survey_service.has_main_sleep_for_date(
+                session, user.id, local_date
+            ):
+                logger.info("Гонка: main-сон уже есть, пишем sleep_type='none'")
+                data["sleep_type"] = "none"
+                data["sleep_duration_category"] = "skipped"
+                data["sleep_quality"] = "skipped"
+            if data["medication_filled"] and survey_service.has_medication_for_date(
+                session, user.id, local_date
+            ):
+                logger.info("Гонка: лекарства уже есть, пишем medication_filled=false")
+                data["medication_filled"] = False
+                data["medication_taken"] = "not_applicable"
+            survey_service.save_entry(session, user.id, data, local_date)
             if pending is not None:
                 survey_service.mark_pending_completed(session, user.id)
+    except IntegrityError:
+        logger.exception("IntegrityError при сохранении опроса (вероятно гонка)")
+        target = (
+            update.callback_query.message if update.callback_query else update.message
+        )
+        await target.reply_text(
+            "Запись уже была сохранена раньше. Дубль не создан."
+        )
+        context.user_data.pop("survey", None)
+        return ConversationHandler.END
     except Exception:
         logger.exception("Ошибка сохранения опроса")
         target = (
@@ -370,10 +468,16 @@ async def _finish_survey(
         f"Энергия: {data['energy']}",
         f"Раздражительность: {data['irritability']}",
         f"Импульсивность: {data['impulsivity']}",
-        f"Сон: {SLEEP_DURATION_LABELS.get(data['sleep_duration_category'], '')}, "
-        f"качество: {SLEEP_QUALITY_LABELS.get(data['sleep_quality'], '')}",
-        f"Лекарства: {MEDICATION_LABELS.get(data['medication_taken'], '')}",
     ]
+    if not skip_sleep:
+        summary_lines.append(
+            f"Сон: {SLEEP_DURATION_LABELS.get(data['sleep_duration_category'], '')}, "
+            f"качество: {SLEEP_QUALITY_LABELS.get(data['sleep_quality'], '')}"
+        )
+    if not skip_medication:
+        summary_lines.append(
+            f"Лекарства: {MEDICATION_LABELS.get(data['medication_taken'], '')}"
+        )
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text("\n".join(summary_lines))
 

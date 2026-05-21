@@ -41,7 +41,12 @@ def _avg(values: Sequence[float]) -> float:
 def build_summary(
     entries: Sequence[SurveyEntry], days: int | None, user_timezone: str
 ) -> str:
-    """Текстовая сводка. days=None — все данные."""
+    """Текстовая сводка. days=None — все данные.
+
+    Дополнительный сон (sleep_type='additional') хранит нули в шкалах и не должен
+    влиять на средние — фильтруем его из выборки для статистики настроения.
+    """
+    entries = [e for e in entries if e.sleep_type != "additional"]
     if not entries:
         return "Записей нет."
 

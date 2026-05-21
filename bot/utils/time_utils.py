@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytz
@@ -54,6 +54,11 @@ def parse_time(value: str) -> time | None:
 
 def now_in_tz(tz_name: str) -> datetime:
     return datetime.now(get_tz(tz_name))
+
+
+def user_local_date(tz_name: str) -> date:
+    """Текущая дата в TZ пользователя. Используется для проверок 'сегодня'."""
+    return datetime.now(ZoneInfo(tz_name)).date()
 
 
 def period_start(now: datetime, days: int) -> datetime:

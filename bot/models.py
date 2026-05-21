@@ -1,11 +1,13 @@
-from datetime import datetime, time
+from datetime import date, datetime, time
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -100,6 +102,13 @@ class SurveyEntry(Base):
         CheckConstraint(
             "impulsivity BETWEEN 0 AND 5", name="ck_impulsivity_range"
         ),
+        CheckConstraint(
+            "sleep_type IN ('main', 'additional', 'none')", name="ck_sleep_type"
+        ),
+        Index("ix_survey_entries_local_date", "user_id", "local_date"),
+        # Уникальные индексы создаются в миграции (CREATE UNIQUE INDEX ... WHERE ...).
+        # SQLAlchemy не умеет частичные индексы декларативно для всех версий — поэтому
+        # они описаны только в миграции 0003.
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -108,6 +117,13 @@ class SurveyEntry(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    local_date: Mapped[date] = mapped_column(Date, nullable=False)
+    sleep_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="main"
+    )
+    medication_filled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
     )
 
     mood: Mapped[int] = mapped_column(Integer, nullable=False)

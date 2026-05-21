@@ -21,6 +21,7 @@ SLEEP_DURATION_CATEGORIES = [
     ("more_9h", "Больше 9 часов"),
 ]
 SLEEP_DURATION_LABELS = dict(SLEEP_DURATION_CATEGORIES)
+SLEEP_DURATION_LABELS["skipped"] = "—"
 SLEEP_DURATION_TO_HOURS = {
     "no_sleep": 0,
     "less_3h": 2,
@@ -28,6 +29,7 @@ SLEEP_DURATION_TO_HOURS = {
     "5_7h": 6,
     "7_9h": 8,
     "more_9h": 10,
+    "skipped": 0,
 }
 
 # Качество сна
@@ -39,12 +41,14 @@ SLEEP_QUALITY_CATEGORIES = [
     ("deep", "Крепкий"),
 ]
 SLEEP_QUALITY_LABELS = dict(SLEEP_QUALITY_CATEGORIES)
+SLEEP_QUALITY_LABELS["skipped"] = "—"
 SLEEP_QUALITY_TO_SCORE = {
     "terrible": 1,
     "bad": 2,
     "normal": 3,
     "good": 4,
     "deep": 5,
+    "skipped": 0,
 }
 
 # Проблемы сна

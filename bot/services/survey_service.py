@@ -1,8 +1,8 @@
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from bot.constants import (
@@ -63,29 +63,136 @@ def get_settings(session: Session, user_id: int) -> UserSettings | None:
     )
 
 
-def save_entry(session: Session, user_id: int, data: dict[str, Any]) -> SurveyEntry:
+def has_main_sleep_for_date(
+    session: Session, user_id: int, target_date: date
+) -> bool:
+    return session.scalar(
+        select(SurveyEntry.id).where(
+            and_(
+                SurveyEntry.user_id == user_id,
+                SurveyEntry.local_date == target_date,
+                SurveyEntry.sleep_type == "main",
+            )
+        ).limit(1)
+    ) is not None
+
+
+def has_medication_for_date(
+    session: Session, user_id: int, target_date: date
+) -> bool:
+    return session.scalar(
+        select(SurveyEntry.id).where(
+            and_(
+                SurveyEntry.user_id == user_id,
+                SurveyEntry.local_date == target_date,
+                SurveyEntry.medication_filled.is_(True),
+            )
+        ).limit(1)
+    ) is not None
+
+
+def get_medication_entry_for_date(
+    session: Session, user_id: int, target_date: date
+) -> SurveyEntry | None:
+    return session.scalar(
+        select(SurveyEntry).where(
+            and_(
+                SurveyEntry.user_id == user_id,
+                SurveyEntry.local_date == target_date,
+                SurveyEntry.medication_filled.is_(True),
+            )
+        ).order_by(SurveyEntry.created_at.desc()).limit(1)
+    )
+
+
+def save_entry(
+    session: Session, user_id: int, data: dict[str, Any], local_date: date
+) -> SurveyEntry:
+    """Сохраняет основную запись опроса.
+
+    `data` может содержать sleep_type ('main'|'none') и medication_filled (bool).
+    Если sleep_type='none', поля сна заполняются дефолтами (категория из БД nullable=False,
+    поэтому подставляем 'unknown'/'none' маркеры — см. ниже).
+    """
+    sleep_type = data.get("sleep_type", "main")
+    medication_filled = data.get("medication_filled", True)
     entry = SurveyEntry(
         user_id=user_id,
+        local_date=local_date,
+        sleep_type=sleep_type,
+        medication_filled=medication_filled,
         mood=data["mood"],
         anxiety=data["anxiety"],
         energy=data["energy"],
         irritability=data["irritability"],
         impulsivity=data["impulsivity"],
-        sleep_duration_category=data["sleep_duration_category"],
-        sleep_quality=data["sleep_quality"],
+        sleep_duration_category=data.get("sleep_duration_category", "skipped"),
+        sleep_quality=data.get("sleep_quality", "skipped"),
         hard_to_fall_asleep=data.get("hard_to_fall_asleep", False),
         early_wakeup=data.get("early_wakeup", False),
         frequent_wakeups=data.get("frequent_wakeups", False),
         little_sleep_but_feel_good=data.get("little_sleep_but_feel_good", False),
         long_sleep_not_restored=data.get("long_sleep_not_restored", False),
-        medication_taken=data["medication_taken"],
+        medication_taken=data.get("medication_taken", "not_applicable"),
         comment=data.get("comment"),
         source=data["source"],
     )
     session.add(entry)
     session.flush()
     logger.info(
-        "Сохранена запись id=%s user_id=%s source=%s", entry.id, user_id, entry.source
+        "Сохранена запись id=%s user_id=%s source=%s sleep_type=%s med_filled=%s",
+        entry.id, user_id, entry.source, sleep_type, medication_filled,
+    )
+    return entry
+
+
+def save_additional_sleep(
+    session: Session,
+    user_id: int,
+    local_date: date,
+    sleep_duration_category: str,
+    sleep_quality: str,
+    source: str,
+) -> SurveyEntry:
+    """Создаёт запись с sleep_type='additional' без вопросов настроения и т.п.
+    Числовые шкалы заполняются нейтральными нулями — статистика игнорирует
+    additional через фильтр sleep_type."""
+    entry = SurveyEntry(
+        user_id=user_id,
+        local_date=local_date,
+        sleep_type="additional",
+        medication_filled=False,
+        mood=0, anxiety=0, energy=0, irritability=0, impulsivity=0,
+        sleep_duration_category=sleep_duration_category,
+        sleep_quality=sleep_quality,
+        hard_to_fall_asleep=False,
+        early_wakeup=False,
+        frequent_wakeups=False,
+        little_sleep_but_feel_good=False,
+        long_sleep_not_restored=False,
+        medication_taken="not_applicable",
+        comment=None,
+        source=source,
+    )
+    session.add(entry)
+    session.flush()
+    logger.info(
+        "Добавлен дополнительный сон id=%s user_id=%s date=%s", entry.id, user_id, local_date
+    )
+    return entry
+
+
+def update_medication(
+    session: Session, user_id: int, local_date: date, new_value: str
+) -> SurveyEntry | None:
+    """UPDATE сегодняшней записи с medication_filled=true. Возвращает её или None."""
+    entry = get_medication_entry_for_date(session, user_id, local_date)
+    if entry is None:
+        return None
+    entry.medication_taken = new_value
+    session.flush()
+    logger.info(
+        "Обновлены лекарства id=%s user_id=%s -> %s", entry.id, user_id, new_value
     )
     return entry
 

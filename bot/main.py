@@ -35,6 +35,8 @@ from bot.keyboards.main_menu import (
     BTN_SETTINGS,
     BTN_STATS,
 )
+from bot.handlers.add_sleep import build_add_sleep_conversation
+from bot.handlers.edit_meds import build_edit_meds_conversation
 from bot.handlers.stats import stats_handlers
 from bot.handlers.survey import (
     build_survey_conversation,
@@ -53,6 +55,8 @@ async def _post_init(application: Application) -> None:
             BotCommand("menu", "Главное меню"),
             BotCommand("help", "Помощь"),
             BotCommand("add", "Добавить запись"),
+            BotCommand("add_sleep", "Добавить ещё один сон"),
+            BotCommand("edit_meds", "Изменить лекарства за сегодня"),
             BotCommand("settings", "Настройки уведомлений"),
             BotCommand("stats", "Статистика"),
             BotCommand("export", "Экспорт в Excel"),
@@ -79,6 +83,8 @@ def main() -> None:
 
     # Опрос — ставим первым, чтобы перехватывать survey:start раньше прочих.
     application.add_handler(build_survey_conversation())
+    application.add_handler(build_add_sleep_conversation())
+    application.add_handler(build_edit_meds_conversation())
     application.add_handler(
         CallbackQueryHandler(unfinished_choice_callback, pattern=r"^unfinished:")
     )

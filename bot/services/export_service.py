@@ -52,11 +52,16 @@ def build_excel(
     data_rows = [
         {
             "Дата и время": local_dt[id(e)],
-            "Настроение": e.mood,
-            "Тревога": e.anxiety,
-            "Энергия": e.energy,
-            "Раздражительность": e.irritability,
-            "Импульсивность": e.impulsivity,
+            "Тип записи": {
+                "main": "опрос",
+                "none": "опрос (без сна)",
+                "additional": "доп. сон",
+            }.get(e.sleep_type, e.sleep_type),
+            "Настроение": e.mood if e.sleep_type != "additional" else "",
+            "Тревога": e.anxiety if e.sleep_type != "additional" else "",
+            "Энергия": e.energy if e.sleep_type != "additional" else "",
+            "Раздражительность": e.irritability if e.sleep_type != "additional" else "",
+            "Импульсивность": e.impulsivity if e.sleep_type != "additional" else "",
             "Длительность сна": SLEEP_DURATION_LABELS.get(
                 e.sleep_duration_category, e.sleep_duration_category
             ),
@@ -70,7 +75,7 @@ def build_excel(
             "Много сна, но не восстановился/восстановилась": _yes_no(
                 e.long_sleep_not_restored
             ),
-            "Прием лекарств": MEDICATION_LABELS.get(
+            "Прием лекарств": "" if not e.medication_filled else MEDICATION_LABELS.get(
                 e.medication_taken, e.medication_taken
             ),
             "Комментарий": e.comment or "",
@@ -80,11 +85,28 @@ def build_excel(
     ]
     df_data = pd.DataFrame(data_rows)
 
-    if entries:
-        moods = [e.mood for e in entries]
+    # Сводка не должна учитывать дополнительный сон (там нули в шкалах) и
+    # пропуски сна — для шкал берём только полноценные записи опроса.
+    scale_entries = [e for e in entries if e.sleep_type != "additional"]
+    sleep_entries = [
+        e for e in entries
+        if e.sleep_type in ("main", "additional")
+        and e.sleep_duration_category != "skipped"
+    ]
+    med_entries = [e for e in entries if e.medication_filled]
+
+    if scale_entries:
+        moods = [e.mood for e in scale_entries]
         by_day: dict = {}
-        for e in entries:
+        for e in scale_entries:
             by_day.setdefault(local_dt[id(e)].date(), []).append(e)
+        sleep_by_day: dict = {}
+        for e in sleep_entries:
+            sleep_by_day.setdefault(local_dt[id(e)].date(), []).append(e)
+        med_by_day: dict = {}
+        for e in med_entries:
+            med_by_day.setdefault(local_dt[id(e)].date(), []).append(e)
+
         days_high_mood = sum(
             1 for vs in by_day.values() if max(x.mood for x in vs) >= 8
         )
@@ -93,12 +115,12 @@ def build_excel(
         )
         days_low_sleep = sum(
             1
-            for vs in by_day.values()
+            for vs in sleep_by_day.values()
             if max(SLEEP_DURATION_TO_HOURS.get(x.sleep_duration_category, 0) for x in vs)
             < 5
         )
         days_no_med = sum(
-            1 for vs in by_day.values() if all(x.medication_taken == "no" for x in vs)
+            1 for vs in med_by_day.values() if all(x.medication_taken == "no" for x in vs)
         )
         summary = {
             "Период": period_label,
@@ -107,16 +129,16 @@ def build_excel(
             "Минимальное настроение": min(moods),
             "Максимальное настроение": max(moods),
             "Средняя тревога": round(
-                sum(e.anxiety for e in entries) / len(entries), 2
+                sum(e.anxiety for e in scale_entries) / len(scale_entries), 2
             ),
             "Средняя энергия": round(
-                sum(e.energy for e in entries) / len(entries), 2
+                sum(e.energy for e in scale_entries) / len(scale_entries), 2
             ),
             "Средняя раздражительность": round(
-                sum(e.irritability for e in entries) / len(entries), 2
+                sum(e.irritability for e in scale_entries) / len(scale_entries), 2
             ),
             "Средняя импульсивность": round(
-                sum(e.impulsivity for e in entries) / len(entries), 2
+                sum(e.impulsivity for e in scale_entries) / len(scale_entries), 2
             ),
             "Дней с настроением 8+": days_high_mood,
             "Дней с тревогой 4+": days_high_anx,

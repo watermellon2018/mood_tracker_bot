@@ -35,6 +35,24 @@ def _xs(entries: Sequence[SurveyEntry], tz_name: str) -> list[datetime]:
     return [_local_dt(e.created_at, tz_name) for e in entries]
 
 
+def _exclude_additional(entries: Sequence[SurveyEntry]) -> list[SurveyEntry]:
+    """Графики шкал не должны включать дополнительный сон (там нули в шкалах)."""
+    return [e for e in entries if e.sleep_type != "additional"]
+
+
+def _only_with_sleep(entries: Sequence[SurveyEntry]) -> list[SurveyEntry]:
+    """Графики сна — только записи, где сон реально заполнен."""
+    return [
+        e for e in entries
+        if e.sleep_type in ("main", "additional")
+        and e.sleep_duration_category != "skipped"
+    ]
+
+
+def _only_with_medication(entries: Sequence[SurveyEntry]) -> list[SurveyEntry]:
+    return [e for e in entries if e.medication_filled]
+
+
 def _new_png() -> str:
     f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     f.close()
@@ -54,6 +72,7 @@ def _line_chart(
     ymax: int,
     user_timezone: str,
 ) -> str | None:
+    entries = _exclude_additional(entries)
     if not entries:
         return None
     xs = _xs(entries, user_timezone)
@@ -75,6 +94,7 @@ def _line_chart(
 
 
 def plot_mood(entries: Sequence[SurveyEntry], user_timezone: str) -> str | None:
+    entries = _exclude_additional(entries)
     if not entries:
         return None
     xs = _xs(entries, user_timezone)
@@ -128,6 +148,7 @@ def plot_impulsivity(entries, user_timezone):
 def plot_mood_energy(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    entries = _exclude_additional(entries)
     if not entries:
         return None
     xs = _xs(entries, user_timezone)
@@ -157,6 +178,7 @@ def plot_mood_energy(
 def plot_sleep_duration(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    entries = _only_with_sleep(entries)
     if not entries:
         return None
     by_day: dict[datetime, list[int]] = {}
@@ -184,6 +206,7 @@ def plot_sleep_duration(
 def plot_sleep_quality(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    entries = _only_with_sleep(entries)
     if not entries:
         return None
     by_day: dict[datetime, list[int]] = {}
@@ -212,6 +235,7 @@ def plot_sleep_quality(
 def plot_sleep_problems(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    entries = _only_with_sleep(entries)
     if not entries:
         return None
     counts = {key: 0 for key, _ in SLEEP_PROBLEM_LABELS.items()}
@@ -238,6 +262,7 @@ def plot_sleep_problems(
 def plot_mood_spread(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    entries = _exclude_additional(entries)
     if not entries:
         return None
     by_day: dict[datetime, list[int]] = {}
@@ -267,6 +292,7 @@ def plot_mood_spread(
 def plot_medication(
     entries: Sequence[SurveyEntry], user_timezone: str = "UTC"
 ) -> str | None:
+    entries = _only_with_medication(entries)
     if not entries:
         return None
     counter = Counter(e.medication_taken for e in entries)
