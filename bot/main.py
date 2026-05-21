@@ -36,6 +36,12 @@ from bot.keyboards.main_menu import (
     BTN_STATS,
 )
 from bot.handlers.add_sleep import build_add_sleep_conversation
+from bot.handlers.custom_questions import (
+    build_cq_create_conversation,
+    build_cq_list_entry,
+    build_cq_rename_conversation,
+    build_cq_router,
+)
 from bot.handlers.edit_meds import build_edit_meds_conversation
 from bot.handlers.question_settings import build_qs_handler
 from bot.handlers.stats import stats_handlers
@@ -121,8 +127,15 @@ def main() -> None:
     # Выбор часового пояса (onboarding + смена из настроек).
     application.add_handler(build_timezone_handler())
 
-    # Настройки вопросов опроса (этап 1: UI настройки, опрос пока не меняется).
+    # Настройки вопросов опроса.
     application.add_handler(build_qs_handler())
+
+    # Пользовательские вопросы. ConversationHandlers первыми — они владеют
+    # cq:add и cq:rename:N, остальные cq:* идёт в общий роутер.
+    application.add_handler(build_cq_create_conversation())
+    application.add_handler(build_cq_rename_conversation())
+    application.add_handler(build_cq_list_entry())
+    application.add_handler(build_cq_router())
 
     # Статистика и экспорт
     for h in stats_handlers():

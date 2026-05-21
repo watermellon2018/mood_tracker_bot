@@ -19,6 +19,7 @@ from bot.constants import (
     SLEEP_QUALITY_LABELS,
     SLEEP_QUALITY_TO_SCORE,
 )
+from bot.constants_questions import QUESTION_DEFINITIONS
 from bot.models import SurveyEntry
 from bot.utils.time_utils import get_tz
 
@@ -177,55 +178,69 @@ def plot_mood_energy(
     return path
 
 
-def plot_sleep_duration(
+def plot_sleep(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    """Сводный график сна: длительность (часы) и качество (1-5) бок-о-бок
+    с прозрачностью, двумя Y-осями. Один день — две полупрозрачные колонки."""
     entries = _only_with_sleep(entries)
     if not entries:
         return None
-    by_day: dict[datetime, list[int]] = {}
+
+    by_day_hours: dict = {}
+    by_day_qual: dict = {}
     for e in entries:
         d = _local_dt(e.created_at, user_timezone).date()
-        by_day.setdefault(d, []).append(
+        by_day_hours.setdefault(d, []).append(
             SLEEP_DURATION_TO_HOURS.get(e.sleep_duration_category, 0)
         )
-    days = sorted(by_day.keys())
-    values = [max(by_day[d]) for d in days]
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.bar(days, values, color="#7eb6ff")
-    ax.set_title("Длительность сна по дням")
-    ax.set_ylabel("Часы (примерно)")
-    ax.set_ylim(0, 11)
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.autofmt_xdate()
-    path = _new_png()
-    fig.tight_layout()
-    fig.savefig(path, dpi=120)
-    plt.close(fig)
-    return path
-
-
-def plot_sleep_quality(
-    entries: Sequence[SurveyEntry], user_timezone: str
-) -> str | None:
-    entries = _only_with_sleep(entries)
-    if not entries:
-        return None
-    by_day: dict[datetime, list[int]] = {}
-    for e in entries:
-        d = _local_dt(e.created_at, user_timezone).date()
-        by_day.setdefault(d, []).append(
+        by_day_qual.setdefault(d, []).append(
             SLEEP_QUALITY_TO_SCORE.get(e.sleep_quality, 0)
         )
-    days = sorted(by_day.keys())
-    values = [max(by_day[d]) for d in days]
+
+    days = sorted(set(by_day_hours.keys()) | set(by_day_qual.keys()))
+    hours = [max(by_day_hours.get(d, [0])) for d in days]
+    quality = [max(by_day_qual.get(d, [0])) for d in days]
+
+    # Сдвиг колонок по X на пол-ширины: длительность слева, качество справа.
+    # mdates.date2num конвертирует date -> float, чтобы можно было сдвигать.
+    x = mdates.date2num(days)
+    width = 0.4
+
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.bar(days, values, color="#9bd49b")
-    ax.set_title("Качество сна по дням")
-    ax.set_ylabel("Оценка (1–5)")
-    ax.set_yticks(range(1, 6))
-    ax.set_ylim(0, 5.5)
-    ax.grid(True, axis="y", alpha=0.3)
+    bars1 = ax.bar(
+        x - width / 2, hours,
+        width=width, color="#7eb6ff", alpha=0.65,
+        edgecolor="#3a78c2", linewidth=0.8,
+        label="Длительность (часы)",
+    )
+    ax.set_ylabel("Часы (примерно)", color="#3a78c2")
+    ax.set_ylim(0, 11)
+    ax.tick_params(axis="y", labelcolor="#3a78c2")
+
+    ax2 = ax.twinx()
+    bars2 = ax2.bar(
+        x + width / 2, quality,
+        width=width, color="#9bd49b", alpha=0.65,
+        edgecolor="#3f8a3f", linewidth=0.8,
+        label="Качество (1–5)",
+    )
+    ax2.set_ylabel("Оценка качества (1–5)", color="#3f8a3f")
+    ax2.set_ylim(0, 5.5)
+    ax2.set_yticks(range(0, 6))
+    ax2.tick_params(axis="y", labelcolor="#3f8a3f")
+
+    ax.set_title("Сон: длительность и качество по дням")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+
+    # Общая легенда (двух осей).
+    handles = [bars1, bars2]
+    labels = [h.get_label() for h in handles]
+    ax.legend(handles, labels, loc="upper left", fontsize=8)
+
     fig.autofmt_xdate()
     path = _new_png()
     fig.tight_layout()
@@ -291,28 +306,115 @@ def plot_mood_spread(
     return path
 
 
-def plot_medication(
-    entries: Sequence[SurveyEntry], user_timezone: str = "UTC"
+def plot_custom_question(
+    answers: list[dict],
+    question_id: int,
+    question_text: str,
+    answer_type: str,
+    user_timezone: str,
+    min_points: int = 2,
 ) -> str | None:
-    entries = _only_with_medication(entries)
-    if not entries:
+    """График для одного пользовательского вопроса.
+
+    answers — список dict с ключами 'created_at', 'custom_question_id',
+    'answer_type', 'answer_numeric', 'answer_bool', 'answer_text'.
+    Тексты не графитим — возвращаем None.
+    """
+    rows = [
+        a for a in answers
+        if a.get("custom_question_id") == question_id
+    ]
+    if len(rows) < min_points:
         return None
-    counter = Counter(e.medication_taken for e in entries)
-    labels_map = {
-        "yes": "Да",
-        "no": "Нет",
-        "partial": "Частично",
-        "not_applicable": "Не применимо",
-        "skipped": "Пропущено",
-    }
-    keys = list(labels_map.keys())
-    values = [counter.get(k, 0) for k in keys]
-    labels = [labels_map[k] for k in keys]
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.bar(labels, values, color="#f4a6c0")
-    ax.set_title("Прием лекарств — распределение отметок")
-    ax.set_ylabel("Записей")
-    ax.grid(True, axis="y", alpha=0.3)
+
+    title = (question_text or "").strip().rstrip("?")
+    if len(title) > 70:
+        title = title[:67] + "…"
+
+    if answer_type == "scale_0_5":
+        rows = [a for a in rows if a.get("answer_numeric") is not None]
+        if len(rows) < min_points:
+            return None
+        rows = sorted(rows, key=lambda a: a["created_at"])
+        xs = [_local_dt(a["created_at"], user_timezone) for a in rows]
+        ys = [float(a["answer_numeric"]) for a in rows]
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        ax.plot(xs, ys, marker="o", linewidth=1.5, color="#5a6acf")
+        ax.set_title(title, fontsize=10)
+        ax.set_ylabel("Шкала 0–5")
+        ax.set_ylim(-0.3, 5.3)
+        ax.set_yticks(range(0, 6))
+        ax.grid(True, alpha=0.3)
+        _format_x(ax)
+        fig.autofmt_xdate()
+        path = _new_png()
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        return path
+
+    if answer_type == "boolean":
+        # Бар-чарт: Да / Нет за период.
+        yes_count = sum(1 for a in rows if a.get("answer_bool") is True)
+        no_count = sum(1 for a in rows if a.get("answer_bool") is False)
+        if yes_count + no_count < min_points:
+            return None
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ax.bar(["Да", "Нет"], [yes_count, no_count], color=["#9bd49b", "#f4a6c0"])
+        ax.set_title(title, fontsize=10)
+        ax.set_ylabel("Записей за период")
+        ax.grid(True, axis="y", alpha=0.3)
+        path = _new_png()
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        return path
+
+    # text — без графика.
+    return None
+
+
+def plot_optional_question(
+    answers: list[dict],
+    question_code: str,
+    user_timezone: str,
+    min_points: int = 2,
+) -> str | None:
+    """Линейный график для одного опционального вопроса.
+
+    `answers` — список dict с ключами 'created_at', 'question_code',
+    'answer_numeric', 'answer_value'. Используются только те, у которых
+    question_code совпадает и answer_numeric не None.
+
+    Возвращает путь к PNG или None, если данных < min_points.
+    """
+    rows = [
+        a for a in answers
+        if a.get("question_code") == question_code
+        and a.get("answer_numeric") is not None
+    ]
+    if len(rows) < min_points:
+        return None
+
+    rows = sorted(rows, key=lambda a: a["created_at"])
+    xs = [_local_dt(a["created_at"], user_timezone) for a in rows]
+    ys = [float(a["answer_numeric"]) for a in rows]
+
+    defn = QUESTION_DEFINITIONS.get(question_code, {})
+    title = defn.get("question_text", question_code).rstrip("?")
+    options = defn.get("options")
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(xs, ys, marker="o", linewidth=1.5, color="#5a6acf")
+    ax.set_title(title, fontsize=10)
+    ax.set_ylim(-0.3, 4.3)
+    ax.set_yticks(range(0, 5))
+    if options and len(options) == 5:
+        # подписи кнопок 0..4 как тики
+        ax.set_yticklabels(options, fontsize=8)
+    ax.grid(True, alpha=0.3)
+    _format_x(ax)
+    fig.autofmt_xdate()
     path = _new_png()
     fig.tight_layout()
     fig.savefig(path, dpi=120)

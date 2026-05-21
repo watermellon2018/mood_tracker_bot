@@ -9,7 +9,12 @@ from bot.constants import (
     MEDICATION_LABELS,
     SLEEP_DURATION_TO_HOURS,
 )
-from bot.models import SurveyAnswer, SurveyEntry
+from bot.models import (
+    CustomQuestion,
+    CustomQuestionAnswer,
+    SurveyAnswer,
+    SurveyEntry,
+)
 from bot.utils.time_utils import get_tz
 
 
@@ -27,6 +32,34 @@ def fetch_optional_answers(
     for a in rows:
         out.setdefault(a.entry_id, []).append(a)
     return out
+
+
+def fetch_custom_answers(
+    session: Session, entry_ids: list[int]
+) -> dict[int, list[CustomQuestionAnswer]]:
+    """{entry_id: [CustomQuestionAnswer, ...]} для переданных entry_id."""
+    if not entry_ids:
+        return {}
+    rows = session.scalars(
+        select(CustomQuestionAnswer).where(
+            CustomQuestionAnswer.entry_id.in_(entry_ids)
+        )
+    ).all()
+    out: dict[int, list[CustomQuestionAnswer]] = {}
+    for a in rows:
+        out.setdefault(a.entry_id, []).append(a)
+    return out
+
+
+def fetch_user_custom_questions(
+    session: Session, user_id: int
+) -> dict[int, CustomQuestion]:
+    """{custom_question_id: CustomQuestion} — включая архивированные.
+    Нужно для отображения вопросов из старых ответов."""
+    rows = session.scalars(
+        select(CustomQuestion).where(CustomQuestion.user_id == user_id)
+    ).all()
+    return {q.id: q for q in rows}
 
 
 def to_local_date(dt: datetime, tz_name: str):

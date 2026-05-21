@@ -16,6 +16,8 @@ def qs_root_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🌧 Готовые наборы", callback_data="qs:presets")],
             [InlineKeyboardButton("🛠 Настроить вручную", callback_data="qs:manual")],
+            [InlineKeyboardButton("➕ Свой вопрос", callback_data="cq:add")],
+            [InlineKeyboardButton("📝 Мои вопросы", callback_data="qs:cq_list")],
             [InlineKeyboardButton("🔄 Сбросить к базовому набору", callback_data="qs:reset")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="qs:back")],
         ]

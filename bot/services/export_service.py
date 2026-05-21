@@ -44,6 +44,8 @@ def build_excel(
     period_label: str,
     user_timezone: str,
     optional_answers: list[dict] | None = None,
+    custom_answers: list[dict] | None = None,
+    custom_questions_map: dict[int, str] | None = None,
 ) -> str:
     f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
     f.close()
@@ -216,6 +218,37 @@ def build_excel(
             })
         df_optional = pd.DataFrame(opt_rows)
 
+    # Лист "Свои вопросы": long-format custom-ответов.
+    df_custom = None
+    if custom_answers:
+        q_map = custom_questions_map or {}
+        cust_rows = []
+        for row in custom_answers:
+            qid = row["custom_question_id"]
+            qtext = q_map.get(qid, f"(вопрос #{qid})").rstrip("?")
+            atype = row["answer_type"]
+            # Единый столбец "Ответ" — приводим к строке для удобства.
+            if atype == "scale_0_5":
+                ans_value = row.get("answer_numeric")
+                ans_display = "" if ans_value is None else str(int(ans_value))
+            elif atype == "boolean":
+                b = row.get("answer_bool")
+                ans_display = "" if b is None else ("Да" if b else "Нет")
+            else:  # text
+                ans_display = row.get("answer_text") or ""
+            cust_rows.append({
+                "Дата и время": _to_local(row["created_at"], tz),
+                "Вопрос": qtext,
+                "Формат": {
+                    "scale_0_5": "Шкала 0–5",
+                    "boolean": "Да / Нет",
+                    "text": "Текст",
+                }.get(atype, atype),
+                "Ответ": ans_display,
+                "Числовое (0-5)": row.get("answer_numeric"),
+            })
+        df_custom = pd.DataFrame(cust_rows)
+
     try:
         with pd.ExcelWriter(f.name, engine="openpyxl") as writer:
             df_data.to_excel(writer, sheet_name="Данные", index=False)
@@ -224,6 +257,10 @@ def build_excel(
             if df_optional is not None and not df_optional.empty:
                 df_optional.to_excel(
                     writer, sheet_name="Опциональные ответы", index=False
+                )
+            if df_custom is not None and not df_custom.empty:
+                df_custom.to_excel(
+                    writer, sheet_name="Свои вопросы", index=False
                 )
     except Exception:
         logger.exception("Ошибка генерации Excel")

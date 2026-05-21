@@ -259,3 +259,80 @@ class SurveyAnswer(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class CustomQuestion(Base):
+    """Пользовательские вопросы. Архивирование через is_active=False (soft delete).
+    Уникальный частичный индекс по lower(trim(question_text)) WHERE is_active=true
+    создан в миграции 0006."""
+
+    __tablename__ = "custom_questions"
+    __table_args__ = (
+        CheckConstraint(
+            "answer_type IN ('scale_0_5', 'boolean', 'text')",
+            name="ck_custom_q_answer_type",
+        ),
+        CheckConstraint(
+            "char_length(question_text) BETWEEN 1 AND 150",
+            name="ck_custom_q_text_length",
+        ),
+        Index("ix_custom_questions_user_active", "user_id", "is_active"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class CustomQuestionAnswer(Base):
+    """Ответ на пользовательский вопрос. Привязка к entry_id (как survey_answers).
+    Уникальность (entry_id, custom_question_id) защищает от дублей при двойном
+    нажатии кнопок."""
+
+    __tablename__ = "custom_question_answers"
+    __table_args__ = (
+        CheckConstraint(
+            "answer_type IN ('scale_0_5', 'boolean', 'text')",
+            name="ck_custom_a_answer_type",
+        ),
+        Index(
+            "uq_custom_answer_entry_question",
+            "entry_id",
+            "custom_question_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    entry_id: Mapped[int] = mapped_column(
+        ForeignKey("survey_entries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    custom_question_id: Mapped[int] = mapped_column(
+        ForeignKey("custom_questions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    answer_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_numeric: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    answer_bool: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

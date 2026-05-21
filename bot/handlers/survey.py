@@ -32,6 +32,10 @@ from bot.constants_questions import (
     options_for,
 )
 from bot.database import session_scope
+from bot.keyboards.custom_question_keyboards import (
+    cq_boolean_keyboard,
+    cq_scale_0_5_keyboard,
+)
 from bot.keyboards.survey_keyboards import (
     anxiety_keyboard,
     comment_skip_keyboard,
@@ -47,6 +51,7 @@ from bot.keyboards.survey_keyboards import (
 from sqlalchemy.exc import IntegrityError
 
 from bot.services import (
+    custom_question_service,
     question_settings_service,
     reminder_service,
     survey_service,
@@ -81,8 +86,9 @@ logger = logging.getLogger(__name__)
     SLEEP_PROBLEMS,
     MEDICATION,
     OPTIONAL_Q,
+    CUSTOM_Q,
     COMMENT,
-) = range(9)
+) = range(10)
 
 
 # ---------- helpers ----------
@@ -128,8 +134,15 @@ def _init_survey(
                 c for c in OPTIONAL_QUESTION_ORDER
                 if c in enabled and c not in _HANDLED_AS_BASE
             ]
+            # Custom-вопросы — список снимков (id, text, type), чтобы не зависеть
+            # от сессии после выхода из with.
+            custom_qs = [
+                {"id": q.id, "text": q.question_text, "type": q.answer_type}
+                for q in custom_question_service.get_enabled(session, user.id)
+            ]
     except Exception:
         logger.exception("Не удалось определить состояние блоков сна/лекарств")
+        custom_qs = []
 
     context.user_data["survey"] = {
         "source": source,
@@ -140,12 +153,20 @@ def _init_survey(
         "optional_codes": optional_codes,
         "optional_idx": 0,
         "optional_answers": [],  # list[dict(code, text, index)]
+        "custom_questions": custom_qs,
+        "custom_idx": 0,
+        "custom_answers": [],  # list[dict(id, type, value, display)]
         "high_risk_triggered": False,
     }
     if optional_codes:
         logger.info(
             "Опрос tg=%s: подключены опциональные вопросы (%d шт): %s",
             tg_id, len(optional_codes), ", ".join(optional_codes),
+        )
+    if custom_qs:
+        logger.info(
+            "Опрос tg=%s: подключены custom-вопросы (%d шт)",
+            tg_id, len(custom_qs),
         )
 
 
@@ -293,7 +314,7 @@ async def _ask_medication_or_skip(
 async def _next_optional_or_comment(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """После базового блока — задаём следующий опциональный или переходим к комментарию."""
+    """После базового блока — задаём следующий опциональный или переходим к custom/комменту."""
     survey = context.user_data["survey"]
     target = update.callback_query.message if update.callback_query else update.message
 
@@ -301,8 +322,7 @@ async def _next_optional_or_comment(
     idx: int = survey.get("optional_idx", 0)
 
     if idx >= len(codes):
-        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
-        return COMMENT
+        return await _next_custom_or_comment(update, context)
 
     code = codes[idx]
     title = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
@@ -311,6 +331,124 @@ async def _next_optional_or_comment(
         question_text, reply_markup=optional_question_keyboard(options)
     )
     return OPTIONAL_Q
+
+
+async def _next_custom_or_comment(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Задаёт следующий пользовательский вопрос. Когда custom закончились — комментарий."""
+    survey = context.user_data["survey"]
+    target = update.callback_query.message if update.callback_query else update.message
+
+    customs: list[dict] = survey.get("custom_questions", [])
+    idx: int = survey.get("custom_idx", 0)
+
+    if idx >= len(customs):
+        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        return COMMENT
+
+    q = customs[idx]
+    text = q["text"]
+    qtype = q["type"]
+
+    if qtype == "scale_0_5":
+        await target.reply_text(
+            f"{text}\n\nВыберите значение от 0 до 5.",
+            reply_markup=cq_scale_0_5_keyboard(),
+        )
+    elif qtype == "boolean":
+        await target.reply_text(text, reply_markup=cq_boolean_keyboard())
+    elif qtype == "text":
+        await target.reply_text(f"Опишите коротко:\n«{text}»")
+    else:
+        # неизвестный тип — пропускаем
+        logger.warning("Unknown custom answer_type: %s, skip", qtype)
+        survey["custom_idx"] = idx + 1
+        return await _next_custom_or_comment(update, context)
+    return CUSTOM_Q
+
+
+async def custom_question_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Обработка ответа на пользовательский вопрос.
+
+    Принимает три варианта callback_data:
+    - cqa:scale:N  (0..5)
+    - cqa:bool:0|1
+    Или текстовое сообщение для вопросов типа text.
+    """
+    survey = context.user_data["survey"]
+    customs: list[dict] = survey.get("custom_questions", [])
+    idx: int = survey.get("custom_idx", 0)
+
+    if idx >= len(customs):
+        # Гонка — просто переходим к комментарию.
+        target = update.callback_query.message if update.callback_query else update.message
+        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        return COMMENT
+
+    q = customs[idx]
+    qtype = q["type"]
+
+    if update.callback_query is not None:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if qtype == "scale_0_5" and data.startswith("cqa:scale:"):
+            try:
+                value = int(data.split(":")[2])
+            except (ValueError, IndexError):
+                return CUSTOM_Q
+            if not (0 <= value <= 5):
+                return CUSTOM_Q
+            display = str(value)
+            survey["custom_answers"].append({
+                "id": q["id"], "type": qtype, "value": value, "display": display,
+            })
+            try:
+                await query.edit_message_text(
+                    f"{q['text']}\n\nВыбрано: {display}"
+                )
+            except Exception:
+                pass
+        elif qtype == "boolean" and data.startswith("cqa:bool:"):
+            try:
+                value = bool(int(data.split(":")[2]))
+            except (ValueError, IndexError):
+                return CUSTOM_Q
+            display = "Да" if value else "Нет"
+            survey["custom_answers"].append({
+                "id": q["id"], "type": qtype, "value": value, "display": display,
+            })
+            try:
+                await query.edit_message_text(f"{q['text']}\n\nОтвет: {display}")
+            except Exception:
+                pass
+        else:
+            # callback не подходит к типу текущего вопроса — игнорируем.
+            return CUSTOM_Q
+    else:
+        # Текстовый ответ для qtype == 'text'.
+        if qtype != "text":
+            return CUSTOM_Q
+        text = (update.message.text or "").strip()
+        if not text:
+            await update.message.reply_text("Текст пустой. Попробуйте ещё раз:")
+            return CUSTOM_Q
+        if len(text) > custom_question_service.MAX_TEXT_ANSWER_LEN:
+            await update.message.reply_text(
+                f"Слишком длинно (макс. {custom_question_service.MAX_TEXT_ANSWER_LEN} симв). "
+                "Сократите:"
+            )
+            return CUSTOM_Q
+        survey["custom_answers"].append({
+            "id": q["id"], "type": qtype, "value": text,
+            "display": text if len(text) <= 60 else text[:57] + "…",
+        })
+
+    survey["custom_idx"] = idx + 1
+    return await _next_custom_or_comment(update, context)
 
 
 async def optional_question_step(
@@ -477,10 +615,13 @@ async def _finish_survey(
     skip_medication = data.pop("skip_medication", False)
     local_date = data.pop("local_date", None)
     optional_answers = data.pop("optional_answers", [])
+    custom_answers = data.pop("custom_answers", [])
     high_risk_triggered = data.pop("high_risk_triggered", False)
     # Эти ключи уже не нужны после извлечения ответов.
     data.pop("optional_codes", None)
     data.pop("optional_idx", None)
+    data.pop("custom_questions", None)
+    data.pop("custom_idx", None)
 
     # Маркируем тип записи. Если сон скипнули — sleep_type='none', поля сна
     # фактически отсутствуют (save_entry проставит дефолты 'skipped').
@@ -525,6 +666,20 @@ async def _finish_survey(
                     answer_text=ans["text"],
                     answer_index=ans["index"],
                 )
+            for ans in custom_answers:
+                try:
+                    custom_question_service.save_answer(
+                        session,
+                        entry_id=entry.id,
+                        custom_question_id=ans["id"],
+                        answer_type=ans["type"],
+                        value=ans["value"],
+                    )
+                except Exception:
+                    logger.exception(
+                        "Не удалось сохранить ответ на custom_question id=%s",
+                        ans["id"],
+                    )
             if pending is not None:
                 survey_service.mark_pending_completed(session, user.id)
     except IntegrityError:
@@ -573,6 +728,15 @@ async def _finish_survey(
                 "question_text", ans["code"]
             )
             summary_lines.append(f"• {title.rstrip('?')}: {ans['text']}")
+    if custom_answers:
+        summary_lines.append("")
+        summary_lines.append("Свои вопросы:")
+        # Заголовки берём из custom_questions снимка, который уже извлечен.
+        # Сделаем lookup на лету по id из survey state — но он уже очищен.
+        # Поэтому в custom_answers удобнее иметь и текст. Пока есть только id.
+        # Чтобы не делать лишний запрос, выводим краткое значение.
+        for ans in custom_answers:
+            summary_lines.append(f"• {ans['display']}")
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text("\n".join(summary_lines))
 
@@ -616,6 +780,13 @@ def build_survey_conversation() -> ConversationHandler:
             ],
             OPTIONAL_Q: [
                 CallbackQueryHandler(optional_question_step, pattern=r"^opt:\d+$")
+            ],
+            CUSTOM_Q: [
+                CallbackQueryHandler(
+                    custom_question_step,
+                    pattern=r"^cqa:(scale:\d+|bool:[01])$",
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, custom_question_step),
             ],
             COMMENT: [
                 CallbackQueryHandler(comment_skip_step, pattern=r"^comment:skip$"),
