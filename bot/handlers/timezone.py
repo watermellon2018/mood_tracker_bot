@@ -12,7 +12,7 @@ from bot.keyboards.timezone_keyboards import (
     timezone_main_keyboard,
     timezone_more_keyboard,
 )
-from bot.services import scheduler_service, survey_service
+from bot.services import nav_service, scheduler_service, survey_service
 from bot.utils.timezones import (
     TIMEZONE_CALLBACK_MAP,
     is_valid_iana_timezone,
@@ -59,7 +59,8 @@ async def timezone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _safe_edit(query, PROMPT_CHOOSE_TZ, timezone_main_keyboard())
         return
     if data == "tz:cancel":
-        await _safe_edit(query, TZ_CANCELLED, None)
+        # Отмена — закрываем inline-меню целиком (не оставляем «зависший» экран).
+        await nav_service.close_menu(update, context, fallback_text=TZ_CANCELLED)
         return
 
     entry = TIMEZONE_CALLBACK_MAP.get(data)
