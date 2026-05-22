@@ -23,7 +23,7 @@ from bot.keyboards.question_settings_keyboards import (
     qs_suicide_warning_keyboard,
 )
 from bot.models import QuestionCatalog
-from bot.services import question_settings_service, survey_service
+from bot.services import nav_service, question_settings_service, survey_service
 from bot.services.question_settings_service import SUICIDAL_CODE
 
 logger = logging.getLogger(__name__)
@@ -83,9 +83,10 @@ async def qs_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if data == "qs:back":
-        # Возврат в /settings — просто закрываем экран. Заменяем на дисклеймер,
-        # пользователь может снова открыть из /settings.
-        await _show(update, "Готово.", None)
+        # qs:back теперь = закрыть inline-меню (близко к нативному поведению).
+        # nav_service.close_menu сначала пытается удалить сообщение, чтобы
+        # не оставлять зависшее меню без кнопок (важно на мобильнике).
+        await nav_service.close_menu(update, context)
         return
 
     if data == "qs:presets":

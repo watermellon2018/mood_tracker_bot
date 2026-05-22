@@ -117,12 +117,23 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             settings_menu_callback,
-            pattern=r"^set:(freq|tz|toggle_notif|toggle_rem)$",
+            pattern=r"^set:(freq|tz|toggle_notif|toggle_rem|close)$",
         )
     )
     application.add_handler(
         CallbackQueryHandler(frequency_callback, pattern=r"^freq:\d+$")
     )
+
+    # Настройка частоты прохождения опроса (раз в день/неделю/2 недели/N дней).
+    # Custom-days FSM ставим первым, чтобы перехватить freq2:custom.
+    from bot.handlers.survey_frequency import (
+        build_custom_days_conversation,
+        build_frequency_open_handler,
+        build_frequency_router,
+    )
+    application.add_handler(build_custom_days_conversation())
+    application.add_handler(build_frequency_open_handler())
+    application.add_handler(build_frequency_router())
 
     # Выбор часового пояса (onboarding + смена из настроек).
     application.add_handler(build_timezone_handler())

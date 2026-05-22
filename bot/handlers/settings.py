@@ -17,7 +17,8 @@ from bot.keyboards.settings_keyboards import (
     frequency_keyboard,
     settings_menu_keyboard,
 )
-from bot.services import scheduler_service, survey_service
+from bot.services import nav_service, scheduler_service, survey_service
+from bot.services.survey_frequency_service import format_survey_frequency
 from bot.utils.timezones import label_for_timezone
 from bot.texts import (
     SETTINGS_END_PROMPT,
@@ -46,9 +47,13 @@ def _format_settings(user, settings) -> str:
         if tz_label != user.timezone
         else f"Часовой пояс: {user.timezone}"
     )
+    freq_human = format_survey_frequency(
+        settings.survey_frequency_type, settings.survey_frequency_days
+    )
     return (
         SETTINGS_HEADER
-        + f"Частота опросов: {settings.frequency_per_day} раз в день\n"
+        + f"Опросов в день: {settings.frequency_per_day}\n"
+        + f"Частота опроса: {freq_human}\n"
         + f"Промежуток: {settings.start_time.strftime('%H:%M')}–"
         + f"{settings.end_time.strftime('%H:%M')}\n"
         + tz_line + "\n"
@@ -76,6 +81,12 @@ async def settings_menu_callback(
     await query.answer()
     action = query.data.split(":", 1)[1]
     tg_id = update.effective_user.id
+
+    if action == "close":
+        # Закрываем меню настроек. См. nav_service.close_menu — пытается
+        # удалить сообщение, фолбэк на edit/новое сообщение.
+        await nav_service.close_menu(update, context)
+        return None
 
     if action == "freq":
         await query.message.reply_text(

@@ -1,5 +1,14 @@
-"""Пошаговый опрос на ConversationHandler."""
+"""Пошаговый опрос на ConversationHandler.
 
+Учитывает политики показа вопросов (см. bot.services.question_policy_service):
+- сборка опционального плана делается через build_daily_survey_steps;
+- late_phone/physical_activity/stress_events/spending имеют свои option_codes
+  и сохраняются сразу после ответа (чтобы повторный опрос в тот же день
+  корректно увидел, что ответ уже есть);
+- physical_activity — двухшаговый: «Да/Нет» -> длительность, итог JSON.
+"""
+
+import json
 import logging
 import re
 
@@ -26,9 +35,13 @@ from bot.constants import (
 )
 from bot.constants_questions import (
     CRISIS_MESSAGE,
-    OPTIONAL_QUESTION_ORDER,
+    PHYSICAL_ACTIVITY_DURATION_LABELS,
+    PHYSICAL_ACTIVITY_DURATION_QUESTION,
     QUESTION_DEFINITIONS,
     SUICIDAL_HIGH_RISK_INDEX,
+    SURVEY_SLOT_MANUAL,
+    SURVEY_SLOT_SINGLE,
+    option_codes_for,
     options_for,
 )
 from bot.database import session_scope
@@ -43,6 +56,7 @@ from bot.keyboards.survey_keyboards import (
     medication_keyboard,
     mood_keyboard,
     optional_question_keyboard,
+    physical_activity_duration_keyboard,
     sleep_duration_keyboard,
     sleep_problems_keyboard,
     sleep_quality_keyboard,
@@ -52,6 +66,7 @@ from sqlalchemy.exc import IntegrityError
 
 from bot.services import (
     custom_question_service,
+    question_policy_service,
     question_settings_service,
     reminder_service,
     survey_service,
@@ -73,7 +88,12 @@ from bot.texts import (
     SURVEY_INTRO,
     UNFINISHED_SURVEY,
 )
-from bot.utils.time_utils import user_local_date
+from bot.utils.time_utils import (
+    DEFAULT_SLEEP_ASK_TIME,
+    can_ask_sleep_question,
+    user_local_date,
+    user_local_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +106,10 @@ logger = logging.getLogger(__name__)
     SLEEP_PROBLEMS,
     MEDICATION,
     OPTIONAL_Q,
+    PHYS_ACT_DURATION,
     CUSTOM_Q,
     COMMENT,
-) = range(10)
+) = range(11)
 
 
 # ---------- helpers ----------
@@ -104,64 +125,137 @@ _HANDLED_AS_BASE = {"medications"}
 
 
 def _init_survey(
-    context: ContextTypes.DEFAULT_TYPE, source: str, tg_id: int
+    context: ContextTypes.DEFAULT_TYPE, source: str, tg_id: int, survey_slot: str
 ) -> None:
     """Инициализирует state опроса. Определяет:
+    - survey_slot (first/regular/last/single/manual) — влияет на политики;
     - заполнены ли сон и лекарства за локальную дату (для скипа базовых блоков);
-    - список включенных опциональных вопросов и порядок их прохождения.
+    - план опциональных вопросов c учётом политик показа.
     """
     has_sleep = False
     has_med = False
     local_date = None
-    optional_codes: list[str] = []
+    skip_sleep_block = False
+    plan_serialized: list[dict] = []
+    custom_qs: list[dict] = []
     try:
         with session_scope() as session:
             user = survey_service.get_or_create_user(
                 session, tg_id, config.DEFAULT_TIMEZONE
             )
-            local_date = user_local_date(user.timezone)
+            local_now = user_local_now(user.timezone)
+            local_date = local_now.date()
             has_sleep = survey_service.has_main_sleep_for_date(
                 session, user.id, local_date
             )
             has_med = survey_service.has_medication_for_date(
                 session, user.id, local_date
             )
+
+            # Решаем, можно ли сейчас задавать блок сна. После полуночи
+            # локальная дата уже сменилась, но пользователь мог ещё не лечь —
+            # тогда «как спал?» не имеет смысла. Берём порог = min(start_time,
+            # DEFAULT_SLEEP_ASK_TIME=10:00). first_survey_time = start_time
+            # пользователя (расписание уведомлений всегда начинается с него,
+            # см. compute_schedule в bot/utils/time_utils.py).
+            user_settings = survey_service.get_settings(session, user.id)
+            first_survey_time = (
+                user_settings.start_time if user_settings is not None else None
+            )
+            sleep_allowed = can_ask_sleep_question(
+                local_now=local_now,
+                first_survey_time=first_survey_time,
+                has_main_sleep_today=has_sleep,
+            )
+            # skip_sleep объединяет "уже есть запись" и "слишком рано спрашивать".
+            skip_sleep_block = not sleep_allowed
+            threshold = (
+                min(first_survey_time, DEFAULT_SLEEP_ASK_TIME)
+                if first_survey_time is not None else DEFAULT_SLEEP_ASK_TIME
+            )
+            if has_sleep:
+                logger.info(
+                    "sleep skipped because already exists for date "
+                    "tg=%s date=%s", tg_id, local_date,
+                )
+            elif not sleep_allowed:
+                logger.info(
+                    "sleep skipped because before sleep_question_start_time "
+                    "tg=%s tz=%s local_now=%s threshold=%s",
+                    tg_id, user.timezone,
+                    local_now.strftime("%Y-%m-%d %H:%M"),
+                    threshold.strftime("%H:%M"),
+                )
+            else:
+                logger.info(
+                    "sleep asked after sleep_question_start_time "
+                    "tg=%s tz=%s local_now=%s threshold=%s",
+                    tg_id, user.timezone,
+                    local_now.strftime("%Y-%m-%d %H:%M"),
+                    threshold.strftime("%H:%M"),
+                )
             enabled = question_settings_service.enabled_optional_codes(
                 session, user.id
             )
-            # фильтруем и упорядочиваем
-            optional_codes = [
-                c for c in OPTIONAL_QUESTION_ORDER
-                if c in enabled and c not in _HANDLED_AS_BASE
+            # _HANDLED_AS_BASE (medications) исключаем — у них отдельный
+            # базовый шаг. Остальное прокидываем в политики.
+            policy_input = {c for c in enabled if c not in _HANDLED_AS_BASE}
+            plan = question_policy_service.build_daily_survey_steps(
+                session=session,
+                user_id=user.id,
+                enabled_codes=policy_input,
+                survey_slot=survey_slot,
+                local_today=local_date,
+            )
+            plan_serialized = [
+                {
+                    "code": step.code,
+                    "target_date": step.target_date.isoformat(),
+                    "ask_policy": step.ask_policy,
+                }
+                for step in plan
             ]
-            # Custom-вопросы — список снимков (id, text, type), чтобы не зависеть
-            # от сессии после выхода из with.
             custom_qs = [
                 {"id": q.id, "text": q.question_text, "type": q.answer_type}
                 for q in custom_question_service.get_enabled(session, user.id)
             ]
     except Exception:
-        logger.exception("Не удалось определить состояние блоков сна/лекарств")
-        custom_qs = []
+        logger.exception("Не удалось определить состояние опроса")
 
     context.user_data["survey"] = {
         "source": source,
+        "survey_slot": survey_slot,
         "sleep_problems": set(),
-        "skip_sleep": has_sleep,
+        # skip_sleep теперь = "уже записан за сегодня" ИЛИ "слишком рано
+        # спрашивать (до sleep_question_start_time)". См. _init_survey выше.
+        "skip_sleep": skip_sleep_block,
         "skip_medication": has_med,
         "local_date": local_date,
-        "optional_codes": optional_codes,
+        # План шагов: list[dict(code, target_date_iso, ask_policy)]. Сохраняем
+        # сериализованным, чтобы не таскать SurveyStep по user_data.
+        "optional_plan": plan_serialized,
         "optional_idx": 0,
-        "optional_answers": [],  # list[dict(code, text, index)]
+        # Список выполненных шагов (для итогового summary).
+        # dict(code, target_date_iso, display, persisted=True|False)
+        "optional_answers": [],
+        # Промежуточное состояние для двухшагового physical_activity.
+        # None или {"code": "physical_activity", "target_date_iso": "..."}.
+        "pa_pending": None,
         "custom_questions": custom_qs,
         "custom_idx": 0,
-        "custom_answers": [],  # list[dict(id, type, value, display)]
+        "custom_answers": [],
         "high_risk_triggered": False,
     }
-    if optional_codes:
+    if plan_serialized:
         logger.info(
-            "Опрос tg=%s: подключены опциональные вопросы (%d шт): %s",
-            tg_id, len(optional_codes), ", ".join(optional_codes),
+            "Опрос tg=%s slot=%s: %d опциональных шагов: %s",
+            tg_id, survey_slot, len(plan_serialized),
+            ", ".join(step["code"] for step in plan_serialized),
+        )
+    else:
+        logger.info(
+            "Опрос tg=%s slot=%s: опциональных шагов нет",
+            tg_id, survey_slot,
         )
     if custom_qs:
         logger.info(
@@ -180,13 +274,26 @@ async def _send_question(update: Update, text: str, markup) -> None:
 
 # ---------- entry points ----------
 
+def _parse_slot_from_callback(data: str) -> str:
+    """Из 'survey:start' или 'survey:start:<slot>' возвращает slot.
+    Старый формат без слота -> SURVEY_SLOT_SINGLE (безопасный fallback)."""
+    from bot.constants_questions import ALL_SURVEY_SLOTS
+
+    parts = data.split(":")
+    if len(parts) >= 3 and parts[2] in ALL_SURVEY_SLOTS:
+        return parts[2]
+    return SURVEY_SLOT_SINGLE
+
+
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if _is_active_survey(context):
         await update.message.reply_text(
             UNFINISHED_SURVEY, reply_markup=unfinished_survey_keyboard()
         )
         return ConversationHandler.END
-    _init_survey(context, SOURCE_MANUAL, update.effective_user.id)
+    _init_survey(
+        context, SOURCE_MANUAL, update.effective_user.id, SURVEY_SLOT_MANUAL
+    )
     await update.message.reply_text(SURVEY_INTRO)
     await update.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
     return MOOD
@@ -203,6 +310,7 @@ async def survey_start_callback(
             UNFINISHED_SURVEY, reply_markup=unfinished_survey_keyboard()
         )
         return ConversationHandler.END
+    survey_slot = _parse_slot_from_callback(query.data)
     # Источник: если есть pending в статусе reminder_sent — это reminder.
     source = SOURCE_SCHEDULED
     try:
@@ -214,7 +322,7 @@ async def survey_start_callback(
                     source = SOURCE_REMINDER
     except Exception:
         logger.exception("Ошибка определения source при запуске опроса")
-    _init_survey(context, source, update.effective_user.id)
+    _init_survey(context, source, update.effective_user.id, survey_slot)
     await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
     return MOOD
 
@@ -236,7 +344,9 @@ async def unfinished_choice_callback(
         return MOOD
     else:
         context.user_data.pop("survey", None)
-        _init_survey(context, SOURCE_MANUAL, update.effective_user.id)
+        _init_survey(
+            context, SOURCE_MANUAL, update.effective_user.id, SURVEY_SLOT_MANUAL
+        )
         await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
         return MOOD
 
@@ -318,13 +428,14 @@ async def _next_optional_or_comment(
     survey = context.user_data["survey"]
     target = update.callback_query.message if update.callback_query else update.message
 
-    codes: list[str] = survey.get("optional_codes", [])
+    plan: list[dict] = survey.get("optional_plan", [])
     idx: int = survey.get("optional_idx", 0)
 
-    if idx >= len(codes):
+    if idx >= len(plan):
         return await _next_custom_or_comment(update, context)
 
-    code = codes[idx]
+    step = plan[idx]
+    code = step["code"]
     title = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
     question_text, options = options_for(code, title)
     await target.reply_text(
@@ -454,7 +565,18 @@ async def custom_question_step(
 async def optional_question_step(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Обработка ответа на опциональный вопрос. Сохраняет в state и переходит дальше."""
+    """Обработка ответа на опциональный вопрос.
+
+    Спец-обработка:
+    - physical_activity: при "Да" уходим в PHYS_ACT_DURATION; при "Нет"
+      записываем JSON-ответ {done: false, duration: null} и идём дальше.
+    - вопросы с option_codes (late_phone/stress_events/spending) сохраняются
+      с answer_value = код варианта.
+    - остальные — старая логика (answer_value = текст, answer_numeric = idx).
+
+    Сохранение в БД делается в _finish_survey — но с правильным log_date,
+    взятым из плана опроса (для late_phone это previous_day).
+    """
     query = update.callback_query
     await query.answer()
     try:
@@ -464,25 +586,75 @@ async def optional_question_step(
 
     survey = context.user_data["survey"]
     idx: int = survey.get("optional_idx", 0)
-    codes: list[str] = survey.get("optional_codes", [])
-    if idx >= len(codes):
+    plan: list[dict] = survey.get("optional_plan", [])
+    if idx >= len(plan):
         # Из-за гонок — просто переходим к комментарию.
         await query.message.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
         return COMMENT
 
-    code = codes[idx]
+    step = plan[idx]
+    code = step["code"]
+    target_date_iso = step["target_date"]
     _, options = options_for(code)
     if not (0 <= choice_idx < len(options)):
         return OPTIONAL_Q
     answer_text = options[choice_idx]
+    question_text = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
 
-    survey["optional_answers"].append(
-        {"code": code, "text": answer_text, "index": choice_idx}
-    )
+    # --- physical_activity: первый шаг "Да/Нет" ---
+    if code == "physical_activity":
+        if choice_idx == 0:
+            # "Да" — спросим длительность, ничего пока не записываем в state.
+            survey["pa_pending"] = {
+                "code": code,
+                "target_date_iso": target_date_iso,
+            }
+            try:
+                await query.edit_message_text(
+                    f"{question_text}\n\nВыбрано: {answer_text}"
+                )
+            except Exception:
+                pass
+            await query.message.reply_text(
+                PHYSICAL_ACTIVITY_DURATION_QUESTION,
+                reply_markup=physical_activity_duration_keyboard(),
+            )
+            return PHYS_ACT_DURATION
+        else:
+            # "Нет" — записываем JSON и идём дальше.
+            payload = json.dumps({"done": False, "duration": None})
+            survey["optional_answers"].append({
+                "code": code,
+                "answer_value": payload,
+                "answer_index": None,
+                "target_date_iso": target_date_iso,
+                "display": "Нет",
+            })
+            survey["optional_idx"] = idx + 1
+            try:
+                await query.edit_message_text(
+                    f"{question_text}\n\nВыбрано: {answer_text}"
+                )
+            except Exception:
+                pass
+            return await _next_optional_or_comment(update, context)
+
+    # --- Вопросы с option_codes (late_phone, stress_events, spending) ---
+    codes_list = option_codes_for(code)
+    if codes_list is not None:
+        answer_value = codes_list[choice_idx]
+    else:
+        answer_value = answer_text
+
+    survey["optional_answers"].append({
+        "code": code,
+        "answer_value": answer_value,
+        "answer_index": choice_idx,
+        "target_date_iso": target_date_iso,
+        "display": answer_text,
+    })
     survey["optional_idx"] = idx + 1
 
-    # Подсветим выбранный вариант в исходном сообщении.
-    question_text = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
     try:
         await query.edit_message_text(f"{question_text}\n\nВыбрано: {answer_text}")
     except Exception:
@@ -496,6 +668,49 @@ async def optional_question_step(
             update.effective_user.id,
         )
 
+    return await _next_optional_or_comment(update, context)
+
+
+async def physical_activity_duration_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Второй шаг physical_activity: выбор длительности. Записывает JSON
+    и продолжает опрос."""
+    query = update.callback_query
+    await query.answer()
+    survey = context.user_data["survey"]
+    pending = survey.get("pa_pending")
+    if not pending:
+        logger.warning("pa_pending пуст при ответе на длительность активности")
+        return await _next_optional_or_comment(update, context)
+
+    try:
+        duration_key = query.data.split(":", 1)[1]
+    except IndexError:
+        return PHYS_ACT_DURATION
+    if duration_key not in PHYSICAL_ACTIVITY_DURATION_LABELS:
+        return PHYS_ACT_DURATION
+
+    code = pending["code"]
+    target_date_iso = pending["target_date_iso"]
+    duration_label = PHYSICAL_ACTIVITY_DURATION_LABELS[duration_key]
+    payload = json.dumps({"done": True, "duration": duration_key})
+
+    survey["optional_answers"].append({
+        "code": code,
+        "answer_value": payload,
+        "answer_index": None,
+        "target_date_iso": target_date_iso,
+        "display": f"Да, {duration_label.lower()}",
+    })
+    survey["pa_pending"] = None
+    survey["optional_idx"] = survey.get("optional_idx", 0) + 1
+    try:
+        await query.edit_message_text(
+            f"{PHYSICAL_ACTIVITY_DURATION_QUESTION}\n\nВыбрано: {duration_label}"
+        )
+    except Exception:
+        pass
     return await _next_optional_or_comment(update, context)
 
 
@@ -599,6 +814,8 @@ async def comment_skip_step(
 async def _finish_survey(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
+    from datetime import date as _date
+
     data = context.user_data.get("survey", {})
     # Разворачиваем sleep_problems в булевы поля
     problems: set[str] = data.pop("sleep_problems", set())
@@ -617,16 +834,18 @@ async def _finish_survey(
     optional_answers = data.pop("optional_answers", [])
     custom_answers = data.pop("custom_answers", [])
     high_risk_triggered = data.pop("high_risk_triggered", False)
-    # Эти ключи уже не нужны после извлечения ответов.
-    data.pop("optional_codes", None)
+    # Ключи, не нужные в save_entry.
+    data.pop("survey_slot", None)
+    data.pop("optional_plan", None)
     data.pop("optional_idx", None)
+    data.pop("pa_pending", None)
     data.pop("custom_questions", None)
     data.pop("custom_idx", None)
 
     # Маркируем тип записи. Если сон скипнули — sleep_type='none', поля сна
     # фактически отсутствуют (save_entry проставит дефолты 'skipped').
-    # Если лекарства скипнули — medication_filled=false, medication_taken остаётся
-    # 'not_applicable' (save_entry проставит).
+    # Если лекарства скипнули — medication_filled=false, medication_taken
+    # остаётся 'not_applicable' (save_entry проставит).
     data["sleep_type"] = "none" if skip_sleep else "main"
     data["medication_filled"] = not skip_medication
 
@@ -641,9 +860,9 @@ async def _finish_survey(
                 local_date = user_local_date(user.timezone)
             pending = survey_service.latest_pending(session, user.id)
             pending_id = pending.id if pending is not None else None
-            # Двойная проверка: между _init_survey и сейчас могла появиться запись
-            # (другой опрос/доп. сон). Если main уже есть — пишем 'none', чтобы не
-            # упасть на уникальном индексе.
+            # Двойная проверка: между _init_survey и сейчас могла появиться
+            # запись (другой опрос/доп. сон). Если main уже есть — пишем 'none',
+            # чтобы не упасть на уникальном индексе.
             if data["sleep_type"] == "main" and survey_service.has_main_sleep_for_date(
                 session, user.id, local_date
             ):
@@ -658,13 +877,27 @@ async def _finish_survey(
                 data["medication_filled"] = False
                 data["medication_taken"] = "not_applicable"
             entry = survey_service.save_entry(session, user.id, data, local_date)
+            # Сохраняем опциональные ответы. Идемпотентно: если параллельный
+            # опрос уже сохранил ответ за target_date — пропускаем (важно для
+            # once_per_day / last_of_day, чтобы не плодить дубли).
             for ans in optional_answers:
+                code = ans["code"]
+                target_date = _date.fromisoformat(ans["target_date_iso"])
+                if question_policy_service.has_answer_for_question_date(
+                    session, user.id, code, target_date
+                ):
+                    logger.info(
+                        "skip save code=%s: уже есть ответ за %s",
+                        code, target_date,
+                    )
+                    continue
                 survey_service.save_optional_answer(
                     session,
                     entry_id=entry.id,
-                    question_code=ans["code"],
-                    answer_text=ans["text"],
-                    answer_index=ans["index"],
+                    question_code=code,
+                    answer_text=ans["answer_value"],
+                    answer_index=ans["answer_index"],
+                    log_date=target_date,
                 )
             for ans in custom_answers:
                 try:
@@ -727,7 +960,9 @@ async def _finish_survey(
             title = QUESTION_DEFINITIONS.get(ans["code"], {}).get(
                 "question_text", ans["code"]
             )
-            summary_lines.append(f"• {title.rstrip('?')}: {ans['text']}")
+            summary_lines.append(
+                f"• {title.rstrip('?')}: {ans.get('display', '')}"
+            )
     if custom_answers:
         summary_lines.append("")
         summary_lines.append("Свои вопросы:")
@@ -756,10 +991,15 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def build_survey_conversation() -> ConversationHandler:
     from bot.keyboards.main_menu import BTN_ADD
 
+    # Принимаем и старый формат 'survey:start' (без слота), и новый
+    # 'survey:start:<slot>'. Парсинг слота — в _parse_slot_from_callback.
     return ConversationHandler(
         entry_points=[
             CommandHandler("add", add_command),
-            CallbackQueryHandler(survey_start_callback, pattern=r"^survey:start$"),
+            CallbackQueryHandler(
+                survey_start_callback,
+                pattern=r"^survey:start(:[a-z_]+)?$",
+            ),
             MessageHandler(filters.Regex(rf"^{re.escape(BTN_ADD)}$"), add_command),
         ],
         states={
@@ -780,6 +1020,11 @@ def build_survey_conversation() -> ConversationHandler:
             ],
             OPTIONAL_Q: [
                 CallbackQueryHandler(optional_question_step, pattern=r"^opt:\d+$")
+            ],
+            PHYS_ACT_DURATION: [
+                CallbackQueryHandler(
+                    physical_activity_duration_step, pattern=r"^pa_dur:[a-z0-9_]+$"
+                )
             ],
             CUSTOM_Q: [
                 CallbackQueryHandler(

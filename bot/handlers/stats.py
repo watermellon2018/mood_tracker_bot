@@ -27,6 +27,7 @@ from bot.keyboards.statistics_keyboards import (
 )
 from bot.keyboards.stats_keyboards import period_keyboard
 from bot.services import (
+    nav_service,
     statistics_renderer,
     statistics_settings_service,
     stats_service,
@@ -96,7 +97,9 @@ async def stats_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "stats:back":
-        await _show(update, "Готово.", None)
+        # Закрываем меню статистики — удаляем сообщение или редактируем
+        # на короткое подтверждение, чтобы оно не висело без кнопок.
+        await nav_service.close_menu(update, context)
         return
 
     if data == "stats:brief":

@@ -61,6 +61,51 @@ def user_local_date(tz_name: str) -> date:
     return datetime.now(ZoneInfo(tz_name)).date()
 
 
+def user_local_now(tz_name: str) -> datetime:
+    """Текущий момент в TZ пользователя (timezone-aware datetime).
+
+    Используется там, где нужны и дата, и время в локальной зоне (например,
+    чтобы решить, можно ли уже спрашивать про сон — см. can_ask_sleep_question).
+    """
+    return datetime.now(ZoneInfo(tz_name))
+
+
+# Самое позднее время суток, после которого даже у "сов" с поздним
+# notification_time уже можно спрашивать про сон. Если первый слот стоит
+# на 21:00, спросить «как спал» в 21:00 — поздно; ориентируемся хотя бы
+# на 10:00 локального утра.
+DEFAULT_SLEEP_ASK_TIME = time(10, 0)
+
+
+def can_ask_sleep_question(
+    local_now: datetime,
+    first_survey_time: time | None,
+    has_main_sleep_today: bool,
+) -> bool:
+    """Можно ли сейчас задавать блок sleep.
+
+    Правила:
+      1. Если основной сон за текущую локальную дату уже записан — нет.
+      2. Иначе вопрос можно задавать только начиная с
+         sleep_question_start_time = min(first_survey_time, DEFAULT_SLEEP_ASK_TIME).
+         Это защита от случая «полночь+, новая дата уже наступила, но
+         пользователь ещё не ложился» — мы не должны его дёргать с
+         «как спал», пока не наступило утро.
+
+    Если first_survey_time не задан (нет UserSettings), используем
+    DEFAULT_SLEEP_ASK_TIME как порог.
+    """
+    if has_main_sleep_today:
+        return False
+
+    if first_survey_time is None:
+        threshold = DEFAULT_SLEEP_ASK_TIME
+    else:
+        threshold = min(first_survey_time, DEFAULT_SLEEP_ASK_TIME)
+
+    return local_now.time() >= threshold
+
+
 def period_start(now: datetime, days: int) -> datetime:
     return now - timedelta(days=days)
 
