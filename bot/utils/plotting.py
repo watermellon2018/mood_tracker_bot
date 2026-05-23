@@ -1,4 +1,11 @@
-"""Построение PNG-графиков через matplotlib (backend Agg)."""
+"""Построение PNG-графиков через matplotlib (backend Agg).
+
+Все дневные графики числовых шкал (mood/anxiety/energy/irritability/
+impulsivity, опциональные scale-вопросы, custom scale_0_5) агрегируются
+дневной медианой через bot.utils.daily_median. Одна точка = один локальный
+день. Сырые ответы в БД не меняются — это только подготовка данных к
+рендеру.
+"""
 
 import tempfile
 from collections import Counter
@@ -21,6 +28,10 @@ from bot.constants import (
 )
 from bot.constants_questions import QUESTION_DEFINITIONS
 from bot.models import SurveyEntry
+from bot.utils.daily_median import (
+    aggregate_entries_daily_median,
+    aggregate_rows_daily_median,
+)
 from bot.utils.time_utils import get_tz
 
 
@@ -61,8 +72,19 @@ def _new_png() -> str:
 
 
 def _format_x(ax) -> None:
+    """Формат оси X для внутридневных серий (если когда-нибудь понадобится).
+
+    Сейчас дневные графики используют _format_x_daily — одна точка в день,
+    время не несёт информации.
+    """
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
+
+
+def _format_x_daily(ax) -> None:
+    """Формат оси X для дневных графиков: одна точка = один день."""
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
 
 
 def _line_chart(
@@ -73,21 +95,25 @@ def _line_chart(
     ymax: int,
     user_timezone: str,
 ) -> str | None:
+    """Дневной график числовой шкалы.
+
+    Точки агрегируются по локальной дате пользователя медианой. Если за день
+    несколько ответов — одна точка вместо N. Сырые ответы в БД не меняются.
+    """
     entries = _exclude_additional(entries)
-    # Фильтруем записи, где поле None (опциональные шкалы могут отсутствовать).
-    entries = [e for e in entries if getattr(e, field) is not None]
-    if not entries:
+    daily = aggregate_entries_daily_median(entries, field, user_timezone)
+    if not daily:
         return None
-    xs = _xs(entries, user_timezone)
-    ys = [getattr(e, field) for e in entries]
+    xs = [d for d, _ in daily]
+    ys = [v for _, v in daily]
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.plot(xs, ys, marker="o", linewidth=1.5)
-    ax.set_title(title)
+    ax.set_title(f"{title} — дневная медиана")
     ax.set_ylabel(ylabel)
     ax.set_ylim(-0.2, ymax + 0.2)
     ax.set_yticks(range(0, ymax + 1))
     ax.grid(True, alpha=0.3)
-    _format_x(ax)
+    _format_x_daily(ax)
     fig.autofmt_xdate()
     path = _new_png()
     fig.tight_layout()
@@ -97,23 +123,25 @@ def _line_chart(
 
 
 def plot_mood(entries: Sequence[SurveyEntry], user_timezone: str) -> str | None:
+    """Настроение — дневная медиана по локальной дате пользователя."""
     entries = _exclude_additional(entries)
-    if not entries:
+    daily = aggregate_entries_daily_median(entries, "mood", user_timezone)
+    if not daily:
         return None
-    xs = _xs(entries, user_timezone)
-    ys = [e.mood for e in entries]
+    xs = [d for d, _ in daily]
+    ys = [v for _, v in daily]
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.axhspan(0, 3, color="#c9d8ff", alpha=0.4, label="низкое состояние")
     ax.axhspan(4, 6, color="#d5f5d5", alpha=0.4, label="условно стабильная зона")
     ax.axhspan(7, 10, color="#ffe0c2", alpha=0.4, label="повышенное состояние")
     ax.plot(xs, ys, marker="o", linewidth=1.5, color="#222")
-    ax.set_title("Настроение по времени")
+    ax.set_title("Настроение — дневная медиана")
     ax.set_ylabel("Настроение (0–10)")
     ax.set_ylim(-0.2, 10.2)
     ax.set_yticks(range(0, 11))
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
-    _format_x(ax)
+    _format_x_daily(ax)
     fig.autofmt_xdate()
     path = _new_png()
     fig.tight_layout()
@@ -151,25 +179,37 @@ def plot_impulsivity(entries, user_timezone):
 def plot_mood_energy(
     entries: Sequence[SurveyEntry], user_timezone: str
 ) -> str | None:
+    """Настроение и энергия на одной оси X. Каждая шкала агрегируется
+    дневной медианой независимо — у разных дней может различаться набор
+    доступных полей."""
     entries = _exclude_additional(entries)
-    if not entries:
+    mood_daily = aggregate_entries_daily_median(entries, "mood", user_timezone)
+    energy_daily = aggregate_entries_daily_median(entries, "energy", user_timezone)
+    if not mood_daily and not energy_daily:
         return None
-    xs = _xs(entries, user_timezone)
-    mood = [e.mood for e in entries]
-    energy = [e.energy for e in entries]
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(xs, mood, marker="o", color="#1f77b4", label="Настроение (0–10)")
+    if mood_daily:
+        ax.plot(
+            [d for d, _ in mood_daily],
+            [v for _, v in mood_daily],
+            marker="o", color="#1f77b4", label="Настроение (0–10)",
+        )
     ax.set_ylabel("Настроение (0–10)", color="#1f77b4")
     ax.set_ylim(-0.2, 10.2)
     ax.set_yticks(range(0, 11))
     ax2 = ax.twinx()
-    ax2.plot(xs, energy, marker="s", color="#d62728", label="Энергия (0–5)")
+    if energy_daily:
+        ax2.plot(
+            [d for d, _ in energy_daily],
+            [v for _, v in energy_daily],
+            marker="s", color="#d62728", label="Энергия (0–5)",
+        )
     ax2.set_ylabel("Энергия (0–5)", color="#d62728")
     ax2.set_ylim(-0.2, 5.2)
     ax2.set_yticks(range(0, 6))
-    ax.set_title("Настроение и энергия")
+    ax.set_title("Настроение и энергия — дневная медиана")
     ax.grid(True, alpha=0.3)
-    _format_x(ax)
+    _format_x_daily(ax)
     fig.autofmt_xdate()
     path = _new_png()
     fig.tight_layout()
@@ -332,20 +372,21 @@ def plot_custom_question(
         title = title[:67] + "…"
 
     if answer_type == "scale_0_5":
-        rows = [a for a in rows if a.get("answer_numeric") is not None]
-        if len(rows) < min_points:
+        # Дневная медиана: одна точка = один локальный день пользователя.
+        scale_rows = [a for a in rows if a.get("answer_numeric") is not None]
+        daily = aggregate_rows_daily_median(scale_rows, user_timezone)
+        if len(daily) < min_points:
             return None
-        rows = sorted(rows, key=lambda a: a["created_at"])
-        xs = [_local_dt(a["created_at"], user_timezone) for a in rows]
-        ys = [float(a["answer_numeric"]) for a in rows]
+        xs = [d for d, _ in daily]
+        ys = [v for _, v in daily]
         fig, ax = plt.subplots(figsize=(9, 4.5))
         ax.plot(xs, ys, marker="o", linewidth=1.5, color="#5a6acf")
-        ax.set_title(title, fontsize=10)
+        ax.set_title(f"{title} — дневная медиана", fontsize=10)
         ax.set_ylabel("Шкала 0–5")
         ax.set_ylim(-0.3, 5.3)
         ax.set_yticks(range(0, 6))
         ax.grid(True, alpha=0.3)
-        _format_x(ax)
+        _format_x_daily(ax)
         fig.autofmt_xdate()
         path = _new_png()
         fig.tight_layout()
@@ -380,25 +421,29 @@ def plot_optional_question(
     user_timezone: str,
     min_points: int = 2,
 ) -> str | None:
-    """Линейный график для одного опционального вопроса.
+    """Линейный график для одного опционального вопроса — дневная медиана.
 
-    `answers` — список dict с ключами 'created_at', 'question_code',
-    'answer_numeric', 'answer_value'. Используются только те, у которых
+    `answers` — список dict с ключами 'created_at' (или 'log_date'),
+    'question_code', 'answer_numeric'. Используются только те, у которых
     question_code совпадает и answer_numeric не None.
 
-    Возвращает путь к PNG или None, если данных < min_points.
+    Группировка идёт по log_date, если он передан; иначе created_at
+    конвертируется в TZ пользователя.
+
+    Возвращает путь к PNG или None, если получилось меньше min_points
+    дневных точек.
     """
     rows = [
         a for a in answers
         if a.get("question_code") == question_code
         and a.get("answer_numeric") is not None
     ]
-    if len(rows) < min_points:
+    daily = aggregate_rows_daily_median(rows, user_timezone)
+    if len(daily) < min_points:
         return None
 
-    rows = sorted(rows, key=lambda a: a["created_at"])
-    xs = [_local_dt(a["created_at"], user_timezone) for a in rows]
-    ys = [float(a["answer_numeric"]) for a in rows]
+    xs = [d for d, _ in daily]
+    ys = [v for _, v in daily]
 
     defn = QUESTION_DEFINITIONS.get(question_code, {})
     title = defn.get("question_text", question_code).rstrip("?")
@@ -406,14 +451,14 @@ def plot_optional_question(
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.plot(xs, ys, marker="o", linewidth=1.5, color="#5a6acf")
-    ax.set_title(title, fontsize=10)
+    ax.set_title(f"{title} — дневная медиана", fontsize=10)
     ax.set_ylim(-0.3, 4.3)
     ax.set_yticks(range(0, 5))
     if options and len(options) == 5:
         # подписи кнопок 0..4 как тики
         ax.set_yticklabels(options, fontsize=8)
     ax.grid(True, alpha=0.3)
-    _format_x(ax)
+    _format_x_daily(ax)
     fig.autofmt_xdate()
     path = _new_png()
     fig.tight_layout()
