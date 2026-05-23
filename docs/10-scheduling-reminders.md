@@ -69,8 +69,9 @@ Job-callback для планового пуша.
    - weekly → 7 дней с прошлого `last_survey_notification_date`.
    - biweekly → 14 дней.
    - custom_days → N дней.
-   - Если ещё ни разу не слали (last_date is None) → разрешено.
-   - Если `days_passed <= 0` (TZ-сдвиг ушёл в минус) → НЕ слать (защита от дублей).
+   - Если ещё ни разу не слали (`last_date is None`) → разрешено.
+   - Если `last_date == local_today` → разрешено (это «день опроса», остальные слоты этого же дня должны прийти).
+   - Если `days_passed < 0` (локальная дата ушла назад — смена TZ или правка БД) → НЕ слать.
 4. Создаёт `PendingSurvey(status='pending', sent_at=now())`.
 5. Шлёт `SURVEY_SCHEDULED_INTRO` + кнопка «Заполнить опрос» (`start_survey_keyboard(survey_slot)`).
 6. **После успешной отправки** обновляет `settings.last_survey_notification_date = local_today` (если ещё не сегодняшняя). Это гарантирует, что несколько слотов в один день не «трясут» last_date зря.
@@ -135,7 +136,7 @@ for job in job_queue.get_jobs_by_name(f"reminder:{pending_id}"):
 
 Частота применяется к **дню целиком**: если сегодня не «день опроса», ни один слот не отправляется. Если день опроса — все слоты дня уйдут.
 
-После успешной отправки первого слота в дне `last_survey_notification_date` обновляется, и оставшиеся слоты этого дня всё равно пройдут проверку `should_send_survey_today` положительно (с фильтром `days_passed <= 0 → False`). Реализация:
+После успешной отправки первого слота в дне `last_survey_notification_date` обновляется до `local_today`. Оставшиеся слоты этого же дня проходят гейт по ветке `last_date == local_today → True` (см. `should_send_survey_today`). Реализация обновления:
 
 ```python
 if settings.last_survey_notification_date != local_today:

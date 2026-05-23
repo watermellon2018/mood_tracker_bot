@@ -90,6 +90,8 @@ def should_send_survey_today(
 
     Правила:
     - если ещё ни разу не отправляли (last is None) — отправляем;
+    - если last == local_today — сегодня уже «день опроса», остальные
+      слоты этого же дня тоже разрешены (frequency_per_day может быть > 1);
     - daily: интервал >= 1 (т.е. каждый день);
     - weekly/biweekly/custom_days: проверяем (local_today - last).days >= gap.
 
@@ -98,10 +100,14 @@ def should_send_survey_today(
     """
     if last_survey_notification_date is None:
         return True
+    # Сегодня уже зафиксировано как «день опроса» — пропускаем все
+    # оставшиеся слоты этого дня (frequency_per_day может быть > 1).
+    if last_survey_notification_date == local_today:
+        return True
     days_passed = (local_today - last_survey_notification_date).days
-    # Если час вдруг ушёл назад (смена TZ) и days_passed < 0 — считаем, что
-    # сегодня уже отправляли, не дублируем.
-    if days_passed <= 0:
+    # Защита от сдвига локальной даты назад (смена TZ, ручная правка БД):
+    # last в будущем относительно today — не шлём.
+    if days_passed < 0:
         return False
     gap = required_gap_days(frequency_type, frequency_days)
     return days_passed >= gap
