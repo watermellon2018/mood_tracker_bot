@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime, timezone
+from statistics import median
 from typing import Sequence
 
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from bot.models import (
     SurveyAnswer,
     SurveyEntry,
 )
+from bot.utils.daily_median import aggregate_entries_daily_median
 from bot.utils.time_utils import get_tz
 
 
@@ -87,6 +89,19 @@ def _avg(values: Sequence[float]) -> float:
     return round(sum(values) / len(values), 2) if values else 0.0
 
 
+def _daily_median(entries: Sequence[SurveyEntry], field: str, tz: str) -> float | None:
+    """Медиана дневных медиан по полю field.
+
+    Один день — одна точка. Используется в summary, чтобы число согласовывалось
+    с графиком («одна точка = медиана ответов за день»).
+    Возвращает None, если ни одного дневного значения нет.
+    """
+    daily = aggregate_entries_daily_median(entries, field, tz)
+    if not daily:
+        return None
+    return round(median(v for _, v in daily), 2)
+
+
 def build_summary(
     entries: Sequence[SurveyEntry], days: int | None, user_timezone: str
 ) -> str:
@@ -132,22 +147,42 @@ def build_summary(
 
     title = f"Статистика за {days} дней:" if days else "Статистика за все время:"
 
+    # Дневные медианы — то же число, что и точки на графике
+    # (одна точка = медиана за локальный день).
+    mood_med = _daily_median(entries, "mood", user_timezone)
+    anx_med = _daily_median(entries, "anxiety", user_timezone)
+    energy_med = _daily_median(entries, "energy", user_timezone)
+    irrit_med = _daily_median(entries, "irritability", user_timezone)
+    impuls_med = _daily_median(entries, "impulsivity", user_timezone)
+
     lines = [
         title,
         "",
         f"Количество записей: {len(entries)}",
         "",
         f"Среднее настроение: {_avg(moods)}",
+    ]
+    if mood_med is not None:
+        lines.append(f"Медиана настроения (по дням): {mood_med}")
+    lines.extend([
         f"Минимальное настроение: {min(moods)}",
         f"Максимальное настроение: {max(moods)}",
         "",
         f"Средняя тревога: {_avg(anxieties)}",
-        f"Средняя энергия: {_avg(energies)}",
-    ]
+    ])
+    if anx_med is not None:
+        lines.append(f"Медиана тревоги (по дням): {anx_med}")
+    lines.append(f"Средняя энергия: {_avg(energies)}")
+    if energy_med is not None:
+        lines.append(f"Медиана энергии (по дням): {energy_med}")
     if irritabilities:
         lines.append(f"Средняя раздражительность: {_avg(irritabilities)}")
+        if irrit_med is not None:
+            lines.append(f"Медиана раздражительности (по дням): {irrit_med}")
     if impulsivities:
         lines.append(f"Средняя импульсивность: {_avg(impulsivities)}")
+        if impuls_med is not None:
+            lines.append(f"Медиана импульсивности (по дням): {impuls_med}")
     lines.extend([
         "",
         f"Дней с настроением 8+: {days_high_mood}",

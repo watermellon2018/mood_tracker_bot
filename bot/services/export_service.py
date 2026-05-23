@@ -2,6 +2,7 @@ import logging
 import tempfile
 from collections import Counter
 from datetime import datetime, timezone
+from statistics import median
 from typing import Sequence
 
 import pandas as pd
@@ -177,19 +178,22 @@ def build_excel(
             f"{MEDICATION_LABELS.get(k, k)}: {v}" for k, v in med_counter.items()
         )
         comments = [x.comment for x in items if x.comment]
+        # На дневных графиках точки = медиана за день. Здесь, в Excel, цифры
+        # должны совпадать с графиками, поэтому переходим на медиану. Сырые
+        # значения за каждую запись по-прежнему доступны на листе «Данные».
         daily_rows.append(
             {
                 "Дата": day,
                 "Количество записей": len(items),
-                "Среднее настроение": round(sum(moods) / len(moods), 2),
+                "Медиана настроения": round(float(median(moods)), 2),
                 "Минимальное настроение": min(moods),
                 "Максимальное настроение": max(moods),
                 "Разброс настроения": max(moods) - min(moods),
-                "Средняя тревога": round(
-                    sum(x.anxiety for x in items) / len(items), 2
+                "Медиана тревоги": round(
+                    float(median(x.anxiety for x in items)), 2
                 ),
-                "Средняя энергия": round(
-                    sum(x.energy for x in items) / len(items), 2
+                "Медиана энергии": round(
+                    float(median(x.energy for x in items)), 2
                 ),
                 "Сон (часов, примерно)": sleep_hours,
                 "Прием лекарств": med_summary,
