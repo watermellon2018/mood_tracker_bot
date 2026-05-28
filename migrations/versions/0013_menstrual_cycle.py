@@ -1,8 +1,11 @@
 """menstrual cycle: settings, periods, prediction state
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0013
+Revises: 0012
 Create Date: 2026-05-28
+
+Перенумеровано с 0010 → 0013 после мержа upstream-веток, чтобы Alembic-граф
+был линейным.
 
 Менструальный цикл превращается из ежедневного вопроса в отдельную функцию:
 - menstrual_cycle_settings — feature flag и параметры уведомлений на user_id;
@@ -20,8 +23,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0010"
-down_revision = "0009"
+revision = "0013"
+down_revision = "0012"
 branch_labels = None
 depends_on = None
 
