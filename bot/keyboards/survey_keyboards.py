@@ -6,6 +6,11 @@ from bot.constants import (
     SLEEP_PROBLEMS,
     SLEEP_QUALITY_CATEGORIES,
 )
+from bot.constants_questions import (
+    ALL_SURVEY_SLOTS,
+    PHYSICAL_ACTIVITY_DURATION_OPTIONS,
+    SURVEY_SLOT_SINGLE,
+)
 
 
 def scale_keyboard(prefix: str, max_value: int) -> InlineKeyboardMarkup:
@@ -94,20 +99,38 @@ def unfinished_survey_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def start_survey_keyboard() -> InlineKeyboardMarkup:
-    """Кнопка для запуска планового опроса из уведомления."""
+def start_survey_keyboard(survey_slot: str = SURVEY_SLOT_SINGLE) -> InlineKeyboardMarkup:
+    """Кнопка для запуска планового опроса из уведомления.
+
+    survey_slot уезжает в callback_data, чтобы FSM получил его при старте.
+    Если slot невалиден — fallback на single (не теряем last-вопросы).
+    """
+    slot = survey_slot if survey_slot in ALL_SURVEY_SLOTS else SURVEY_SLOT_SINGLE
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Заполнить опрос", callback_data="survey:start")]]
+        [[InlineKeyboardButton(
+            "Заполнить опрос", callback_data=f"survey:start:{slot}"
+        )]]
     )
 
 
 def optional_question_keyboard(options: list[str]) -> InlineKeyboardMarkup:
-    """5 кнопок по числу вариантов опционального вопроса. callback_data — индекс 0..N-1.
+    """Кнопки по числу вариантов опционального вопроса. callback_data — индекс 0..N-1.
 
     Кнопки идут по одной в ряд — подписи у некоторых вопросов длинные.
+    Поддерживает любое число вариантов (4 у stress_events/spending, 5 у шкал,
+    2 у physical_activity done?).
     """
     rows = [
         [InlineKeyboardButton(label, callback_data=f"opt:{idx}")]
         for idx, label in enumerate(options)
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def physical_activity_duration_keyboard() -> InlineKeyboardMarkup:
+    """Длительность физ. активности — 5 вариантов, по одному в ряд."""
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"pa_dur:{key}")]
+        for key, label in PHYSICAL_ACTIVITY_DURATION_OPTIONS
     ]
     return InlineKeyboardMarkup(rows)

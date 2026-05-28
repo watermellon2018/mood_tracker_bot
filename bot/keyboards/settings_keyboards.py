@@ -13,9 +13,10 @@ def settings_menu_keyboard(
         else "Включить повторное напоминание"
     )
     rows = [
-        [   InlineKeyboardButton("Частота опросов", callback_data="set:freq"),
+        [   InlineKeyboardButton("Опросов в день", callback_data="set:freq"),
             InlineKeyboardButton("Время начала", callback_data="set:start"),
             InlineKeyboardButton("Время окончания", callback_data="set:end")],
+        [InlineKeyboardButton("📅 Частота опроса", callback_data="freq2:menu")],
         [   InlineKeyboardButton("Часовой пояс", callback_data="set:tz"),
             InlineKeyboardButton(notif_label, callback_data="set:toggle_notif")],
         [InlineKeyboardButton(rem_label, callback_data="set:toggle_rem")],

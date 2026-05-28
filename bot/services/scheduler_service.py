@@ -10,8 +10,12 @@ from bot.config import config
 from bot.constants import PENDING_STATUS, SOURCE_SCHEDULED
 from bot.database import session_scope
 from bot.models import User, UserSettings
-from bot.services import survey_service
-from bot.utils.time_utils import compute_schedule, get_tz
+from bot.services import (
+    question_policy_service,
+    survey_frequency_service,
+    survey_service,
+)
+from bot.utils.time_utils import compute_schedule, get_tz, user_local_date
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,11 @@ CLEANUP_JOB_NAME = "cleanup_expired_pendings"
 
 
 def schedule_user(application: Application, user: User, settings: UserSettings) -> None:
-    """Удаляет старые задачи пользователя и ставит новые согласно настройкам."""
+    """Удаляет старые задачи пользователя и ставит новые согласно настройкам.
+
+    Каждому слоту назначаем survey_slot (first/regular/last/single) — он
+    передаётся в job data и далее используется политиками вопросов.
+    """
     job_queue = application.job_queue
     if job_queue is None:
         logger.warning("JobQueue не инициализирована")
@@ -42,17 +50,22 @@ def schedule_user(application: Application, user: User, settings: UserSettings) 
         settings.frequency_per_day, settings.start_time, settings.end_time
     )
     tz = get_tz(user.timezone)
-    for slot in schedule:
+    total = len(schedule)
+    for idx, slot_time in enumerate(schedule):
+        survey_slot = question_policy_service.slot_for_index(total, idx)
         job_queue.run_daily(
             send_scheduled_survey,
-            time=time(slot.hour, slot.minute, tzinfo=tz),
+            time=time(slot_time.hour, slot_time.minute, tzinfo=tz),
             name=name,
-            data={"telegram_user_id": user.telegram_user_id},
+            data={
+                "telegram_user_id": user.telegram_user_id,
+                "survey_slot": survey_slot,
+            },
         )
     logger.info(
         "Расписание пересобрано для tg=%s: %s слотов",
         user.telegram_user_id,
-        len(schedule),
+        total,
     )
 
 
@@ -84,13 +97,25 @@ def schedule_cleanup(application: Application) -> None:
 
 
 async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Шлет плановое уведомление с кнопкой и создает pending запись."""
+    """Шлет плановое уведомление с кнопкой и создает pending запись.
+
+    survey_slot из job data попадает в callback_data кнопки запуска опроса,
+    чтобы FSM мог корректно применить политики вопросов.
+
+    Учитывает settings.survey_frequency_type: если сегодня не «день опроса»
+    по выбранной частоте, опрос не отправляется. Частота применяется к дню
+    целиком: если бот пропустил день, он пропускает ВСЕ слоты этого дня.
+    После успешной отправки обновляется last_survey_notification_date
+    (одной записью на день — даже если в дне несколько слотов).
+    """
+    from bot.constants_questions import SURVEY_SLOT_SINGLE
     from bot.keyboards.survey_keyboards import start_survey_keyboard
     from bot.texts import SURVEY_SCHEDULED_INTRO
     from bot.services.notification_sender import safe_send_message
 
     data = context.job.data or {}
     telegram_user_id = data.get("telegram_user_id")
+    survey_slot = data.get("survey_slot", SURVEY_SLOT_SINGLE)
     if telegram_user_id is None:
         return
 
@@ -113,6 +138,7 @@ async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             reminder_enabled = settings.reminder_enabled
             reminder_delay = settings.reminder_delay_minutes
+            user_id = user.id
     except Exception:
         logger.exception("Ошибка БД при отправке планового опроса")
         return
@@ -158,11 +184,13 @@ async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
             data={
                 "telegram_user_id": telegram_user_id,
                 "pending_id": pending_id,
+                "survey_slot": survey_slot,
             },
         )
 
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot.constants_questions import SURVEY_SLOT_SINGLE
     from bot.keyboards.survey_keyboards import start_survey_keyboard
     from bot.texts import SURVEY_REMINDER
     from bot.services.notification_sender import safe_send_message
@@ -170,6 +198,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     telegram_user_id = data.get("telegram_user_id")
     pending_id = data.get("pending_id")
+    survey_slot = data.get("survey_slot", SURVEY_SLOT_SINGLE)
     if telegram_user_id is None or pending_id is None:
         return
 

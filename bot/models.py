@@ -100,6 +100,21 @@ class UserSettings(Base):
     reminder_delay_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=30
     )
+    # Частота прохождения опроса (см. миграцию 0010).
+    # 'daily' | 'weekly' | 'biweekly' | 'custom_days'.
+    survey_frequency_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="daily"
+    )
+    # Только для custom_days. 2..30 дней.
+    survey_frequency_days: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    # Локальная дата последнего успешно отправленного планового опроса.
+    # Используется scheduler-ом для решения should_send_survey_today.
+    # Ручной /add сюда НЕ пишет.
+    last_survey_notification_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -199,7 +214,11 @@ class PendingSurvey(Base):
 
 class QuestionCatalog(Base):
     """Каталог вопросов опроса. Базовые вопросы помечены is_required=True
-    и не могут быть отключены пользователем."""
+    и не могут быть отключены пользователем.
+
+    ask_policy и answer_target_date_policy задают политику показа и привязки
+    даты ответа — см. миграцию 0009 и bot.constants_questions.QUESTION_POLICIES.
+    """
 
     __tablename__ = "question_catalog"
     __table_args__ = (
@@ -219,6 +238,12 @@ class QuestionCatalog(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ask_policy: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="per_survey"
+    )
+    answer_target_date_policy: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="current_day"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -259,7 +284,12 @@ class UserQuestionSettings(Base):
 class SurveyAnswer(Base):
     """EAV-таблица для ответов на опциональные вопросы. К каждой survey_entries
     может относиться 0..N ответов. Базовые вопросы (mood/anxiety/...) хранятся
-    в колонках SurveyEntry — для них SurveyAnswer не создаётся."""
+    в колонках SurveyEntry — для них SurveyAnswer не создаётся.
+
+    log_date — дата, к которой относится ответ. Для большинства вопросов
+    совпадает с entry.local_date, но для late_phone (previous_day policy)
+    log_date = entry.local_date - 1 day.
+    """
 
     __tablename__ = "survey_answers"
 
@@ -276,6 +306,7 @@ class SurveyAnswer(Base):
     )
     answer_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     answer_numeric: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    log_date: Mapped[date] = mapped_column(Date, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

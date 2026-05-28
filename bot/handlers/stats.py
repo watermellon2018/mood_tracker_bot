@@ -27,6 +27,7 @@ from bot.keyboards.statistics_keyboards import (
 )
 from bot.keyboards.stats_keyboards import period_keyboard
 from bot.services import (
+    nav_service,
     statistics_renderer,
     statistics_settings_service,
     stats_service,
@@ -100,7 +101,9 @@ async def stats_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "stats:back":
-        await _show(update, "Готово.", None)
+        # Закрываем меню статистики — удаляем сообщение или редактируем
+        # на короткое подтверждение, чтобы оно не висело без кнопок.
+        await nav_service.close_menu(update, context)
         return
 
     if data == "stats:brief":
@@ -279,11 +282,17 @@ async def _send_report(
                 session, user.id
             )
             entry_dt = {e.id: e.created_at for e in entries}
+            entry_local_date = {e.id: e.local_date for e in entries}
             answers_rows: list[dict] = []
             for entry_id, alist in answers_by_entry.items():
                 for a in alist:
                     answers_rows.append({
                         "created_at": entry_dt[entry_id],
+                        # log_date — локальная дата, к которой относится ответ.
+                        # Для late_phone это previous_day, для остальных
+                        # совпадает с entry.local_date. Используется в
+                        # дневной агрегации графиков.
+                        "log_date": a.log_date,
                         "question_code": a.question_code,
                         "answer_numeric": (
                             float(a.answer_numeric)
@@ -297,6 +306,10 @@ async def _send_report(
                 for a in alist:
                     custom_rows.append({
                         "created_at": entry_dt[entry_id],
+                        # У custom-ответов своего log_date нет — берём
+                        # entry.local_date (это и есть локальная дата
+                        # пользователя на момент сохранения опроса).
+                        "log_date": entry_local_date[entry_id],
                         "custom_question_id": a.custom_question_id,
                         "answer_type": a.answer_type,
                         "answer_text": a.answer_text,

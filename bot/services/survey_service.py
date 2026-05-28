@@ -211,15 +211,23 @@ def save_optional_answer(
     session: Session,
     entry_id: int,
     question_code: str,
-    answer_text: str,
-    answer_index: int,
+    answer_text: str | None,
+    answer_index: int | None,
+    log_date: date,
 ) -> SurveyAnswer:
-    """Записывает ответ на опциональный вопрос в EAV-таблицу."""
+    """Записывает ответ на опциональный вопрос в EAV-таблицу.
+
+    log_date — дата, к которой относится ответ. Для большинства вопросов
+    совпадает с entry.local_date, для late_phone = entry.local_date - 1.
+    answer_text может быть JSON-строкой (см. physical_activity) — в этом
+    случае answer_index может быть None.
+    """
     a = SurveyAnswer(
         entry_id=entry_id,
         question_code=question_code,
         answer_value=answer_text,
         answer_numeric=answer_index,
+        log_date=log_date,
     )
     session.add(a)
     session.flush()

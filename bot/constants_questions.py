@@ -180,12 +180,29 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
         "options": ["Нет", "Лёгкое", "Заметно", "Сильно", "Очень сильно"],
     },
     "spending": {
-        "question_text": "Были ли импульсивные траты сегодня?",
-        "options": ["Нет", "Мелкие", "Заметные", "Крупные", "Очень крупные"],
+        "question_text": (
+            "Были ли сегодня импульсивные траты или сильное желание тратить деньги?"
+        ),
+        # 4 варианта — кнопки рисуются ровно по options.
+        "options": [
+            "Нет",
+            "Было желание, но не тратила",
+            "Да, небольшие траты",
+            "Да, заметные траты",
+        ],
+        "option_codes": [
+            "none",
+            "urge_no_spending",
+            "small_spending",
+            "significant_spending",
+        ],
     },
     "physical_activity": {
+        # Спец-вопрос: вместо одной шкалы — двухшаговый поток
+        # (done? -> duration?). См. PHYSICAL_ACTIVITY_*.
         "question_text": "Была ли сегодня физическая активность?",
-        "options": ["Не было", "Минимум", "Немного", "Обычно", "Много"],
+        "options": ["Да", "Нет"],
+        "option_codes": ["yes", "no"],
     },
     "substances": {
         "question_text": "Были ли сегодня алкоголь или другие вещества?",
@@ -193,15 +210,54 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
     },
     "caffeine": {
         "question_text": "Сколько кофеина было сегодня?",
-        "options": ["Не было", "Мало", "Умеренно", "Много", "Очень много"],
+        # Новые варианты — в кружках. Старые ответы в БД ("Мало"/"Умеренно"/...)
+        # остаются как legacy: answer_numeric (0..4) совместим — индексы те же,
+        # так что аналитика на answer_numeric не ломается. В renderer-е, если
+        # понадобится показать текст, идём через answer_value (там старые
+        # подписи) — это и есть fallback.
+        "options": [
+            "Не было",
+            "1 кружка",
+            "2 кружки",
+            "3–5 кружек",
+            "5+ кружек",
+        ],
+        "option_codes": [
+            "none",
+            "one_cup",
+            "two_cups",
+            "three_to_five_cups",
+            "five_plus_cups",
+        ],
     },
     "late_phone": {
-        "question_text": "Был ли телефон/экран перед сном?",
-        "options": ["Нет", "Чуть-чуть", "Умеренно", "Много", "До поздна"],
+        "question_text": (
+            "Сколько времени вы провели в телефоне или за экраном перед сном вчера?"
+        ),
+        "options": [
+            "Не было",
+            "До 15 минут",
+            "15–30 минут",
+            "30–60 минут",
+            "Больше часа",
+        ],
+        "option_codes": [
+            "none",
+            "lt_15_min",
+            "min_15_30",
+            "min_30_60",
+            "gt_60_min",
+        ],
     },
     "stress_events": {
-        "question_text": "Стрессовые события?",
-        "options": ["Нет", "Лёгкие", "Заметные", "Сильные", "Очень сильные"],
+        "question_text": "Были ли сегодня заметные стрессовые события?",
+        "options": [
+            "Нет",
+            "Да, одно",
+            "Да, несколько",
+            "День был очень стрессовый",
+        ],
+        "option_codes": ["none", "one", "several", "very_stressful_day"],
     },
     "aggression_conflicts": {
         "question_text": "Были ли сегодня агрессия или конфликты?",
@@ -250,3 +306,112 @@ def options_for(code: str, fallback_title: str = "") -> tuple[str, list[str]]:
     if defn is None:
         return (fallback_title or code, DEFAULT_SCALE_OPTIONS)
     return (defn["question_text"], defn["options"])
+
+
+def option_codes_for(code: str) -> list[str] | None:
+    """Если у вопроса есть свои коды вариантов (enum-подобный ответ),
+    возвращает их. Иначе None — значит варианты пишутся как текст из options.
+    """
+    defn = QUESTION_DEFINITIONS.get(code)
+    if defn is None:
+        return None
+    return defn.get("option_codes")
+
+
+# ---------- Политики показа и привязки даты ответа ----------
+#
+# Эти словари — единый источник правды для Python-кода. БД хранит их же значения
+# (миграция 0009) для отчётности и фильтров через SQL.
+#
+# Возможные значения ask_policy:
+#   'per_survey'                  — спрашивать в каждом опросе;
+#   'once_per_day'                — один раз за локальный день;
+#   'first_survey_until_answered' — задавать в первом опросе дня; пока ответа
+#                                   нет — повторять в каждом следующем опросе
+#                                   ТОГО ЖЕ дня; на следующий день не переносим;
+#   'last_survey_of_day'          — только в последнем опросе дня.
+#
+# Возможные значения answer_target_date_policy:
+#   'current_day'  — ответ относится к сегодняшнему локальному дню;
+#   'previous_day' — ответ относится к вчерашнему локальному дню (late_phone).
+
+ASK_POLICY_PER_SURVEY = "per_survey"
+ASK_POLICY_ONCE_PER_DAY = "once_per_day"
+ASK_POLICY_FIRST_UNTIL_ANSWERED = "first_survey_until_answered"
+ASK_POLICY_LAST_OF_DAY = "last_survey_of_day"
+
+TARGET_DATE_CURRENT = "current_day"
+TARGET_DATE_PREVIOUS = "previous_day"
+
+# Слоты опроса. single = и первый, и последний; manual — ручной запуск.
+SURVEY_SLOT_FIRST = "first"
+SURVEY_SLOT_REGULAR = "regular"
+SURVEY_SLOT_LAST = "last"
+SURVEY_SLOT_SINGLE = "single"
+SURVEY_SLOT_MANUAL = "manual"
+
+ALL_SURVEY_SLOTS = {
+    SURVEY_SLOT_FIRST,
+    SURVEY_SLOT_REGULAR,
+    SURVEY_SLOT_LAST,
+    SURVEY_SLOT_SINGLE,
+    SURVEY_SLOT_MANUAL,
+}
+
+# Политики по кодам. Если кода нет в карте — по умолчанию (per_survey/current_day).
+#
+# В per_survey остаются вопросы про "состояние сейчас":
+#   mood, anxiety, energy, irritability, self_esteem_guilt, avoidance,
+#   somatic_anxiety, thought_speech_speed, libido, panic_attacks, appetite,
+#   comment — они нужны в каждом срезе дня.
+#
+# Вопросы про ИТОГ дня ("сегодня", "за день", "прошёл день") — last_survey_of_day:
+# они формулируются как сводка и должны задаваться только в last/single слоте.
+QUESTION_POLICIES: dict[str, dict[str, str]] = {
+    # once_per_day — про режим, разово фиксируем за день и не пересматриваем.
+    "sleep":           {"ask": ASK_POLICY_ONCE_PER_DAY,        "target": TARGET_DATE_CURRENT},
+    "medications":     {"ask": ASK_POLICY_ONCE_PER_DAY,        "target": TARGET_DATE_CURRENT},
+    # first_survey_until_answered — про "вчера", пока не ответили.
+    "late_phone":      {"ask": ASK_POLICY_FIRST_UNTIL_ANSWERED, "target": TARGET_DATE_PREVIOUS},
+    # last_survey_of_day — дневные итоги. Задаются только в last/single слоте.
+    "anhedonia":           {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "concentration":       {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "productivity":        {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "social_activity":     {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "obsessive_thoughts":  {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "hypomania":           {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "impulsivity":         {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "risky_behavior":      {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "spending":            {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "physical_activity":   {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "substances":          {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "caffeine":            {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "stress_events":       {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "aggression_conflicts":{"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "therapy":             {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "menstrual_cycle":     {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+    "suicidal_thoughts":   {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
+}
+
+
+def get_ask_policy(code: str) -> str:
+    return QUESTION_POLICIES.get(code, {}).get("ask", ASK_POLICY_PER_SURVEY)
+
+
+def get_target_date_policy(code: str) -> str:
+    return QUESTION_POLICIES.get(code, {}).get("target", TARGET_DATE_CURRENT)
+
+
+# ---------- Physical activity (двухшаговый ответ) ----------
+
+PHYSICAL_ACTIVITY_QUESTION = "Была ли сегодня физическая активность?"
+PHYSICAL_ACTIVITY_DURATION_QUESTION = "Сколько примерно по времени?"
+
+PHYSICAL_ACTIVITY_DURATION_OPTIONS = [
+    ("lt_15_min", "До 15 минут"),
+    ("min_15_30", "15–30 минут"),
+    ("min_30_60", "30–60 минут"),
+    ("h_1_2",     "1–2 часа"),
+    ("gt_2_h",    "Больше 2 часов"),
+]
+PHYSICAL_ACTIVITY_DURATION_LABELS = dict(PHYSICAL_ACTIVITY_DURATION_OPTIONS)
