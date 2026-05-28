@@ -1,8 +1,12 @@
 """custom question frequency: ask_frequency_type / ask_every_n / last_asked_local_date
 
-Revision ID: 0009
-Revises: 0008
+Revision ID: 0012
+Revises: 0011
 Create Date: 2026-05-28
+
+Перенумеровано с 0009 → 0012 после мержа upstream-веток (0009_question_policies,
+0010_survey_frequency, 0011_last_survey_policies), чтобы Alembic-граф был
+линейным. Самой миграции это не меняет — таблицы и колонки те же.
 
 Добавляет в custom_questions параметры частоты показа:
 
@@ -28,8 +32,8 @@ Create Date: 2026-05-28
 from alembic import op
 
 
-revision = "0009"
-down_revision = "0008"
+revision = "0012"
+down_revision = "0011"
 branch_labels = None
 depends_on = None
 

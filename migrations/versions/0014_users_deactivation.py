@@ -1,8 +1,11 @@
 """users soft delete: is_active, blocked_bot_at, deleted_at, deactivation_reason
 
-Revision ID: 0011
-Revises: 0010
+Revision ID: 0014
+Revises: 0013
 Create Date: 2026-05-28
+
+Перенумеровано с 0011 → 0014 после мержа upstream-веток, чтобы Alembic-граф
+был линейным.
 
 Soft delete для пользователей. Когда Telegram возвращает Forbidden (бот
 заблокирован пользователем) или BadRequest 'chat not found' / 'user is
@@ -22,8 +25,8 @@ deactivated', помечаем пользователя как inactive вмес
 from alembic import op
 
 
-revision = "0011"
-down_revision = "0010"
+revision = "0014"
+down_revision = "0013"
 branch_labels = None
 depends_on = None
 
