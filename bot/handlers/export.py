@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from telegram import Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, ContextTypes
 
 from bot.config import config
 from bot.database import session_scope
@@ -116,7 +116,9 @@ async def export_period_callback(
 
 
 def export_handlers():
+    # /export-команда переехала в bot/handlers/reports.py (она открывает
+    # общее меню «📄 Отчёт»). Здесь оставляем только callback на выбор
+    # периода — он по-прежнему выполняет реальную Excel-выгрузку.
     return [
-        CommandHandler("export", export_command),
         CallbackQueryHandler(export_period_callback, pattern=r"^export:(7|14|30|all)$"),
     ]

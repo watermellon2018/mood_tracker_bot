@@ -9,11 +9,11 @@ from bot.constants_statistics import (
 
 
 def stats_menu_keyboard() -> InlineKeyboardMarkup:
+    """Меню /stats — только быстрая статистика в чате. Полный отчёт, PDF
+    и Excel переехали в отдельный раздел «📄 Отчёт»."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ Кратко", callback_data="stats:brief")],
         [InlineKeyboardButton("🎛 Выбранные блоки", callback_data="stats:selected")],
-        [InlineKeyboardButton("📦 Полный отчет", callback_data="stats:full")],
-        [InlineKeyboardButton("📄 Excel-отчет", callback_data="stats:excel")],
         [InlineKeyboardButton("⚙️ Настроить статистику", callback_data="stats:settings")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="stats:back")],
     ])

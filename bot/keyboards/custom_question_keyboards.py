@@ -3,6 +3,18 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import CustomQuestion
+from bot.services.custom_question_service import (
+    EVERY_N_DAYS_MAX,
+    EVERY_N_DAYS_MIN,
+    FREQUENCY_BIWEEKLY,
+    FREQUENCY_EVERY_N_DAYS,
+    FREQUENCY_EVERY_SURVEY,
+    FREQUENCY_NTH_SURVEY,
+    FREQUENCY_WEEKLY,
+    SLOT_EVENING,
+    SLOT_MIDDAY,
+    SLOT_MORNING,
+)
 
 # Сокращения для отображения текста вопроса на кнопках.
 MAX_BTN_TEXT = 45
@@ -49,6 +61,7 @@ def cq_confirm_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ Добавить", callback_data="cq:confirm")],
         [InlineKeyboardButton("✏️ Изменить текст", callback_data="cq:edit_text")],
         [InlineKeyboardButton("🔄 Изменить формат", callback_data="cq:edit_type")],
+        [InlineKeyboardButton("🔁 Изменить частоту", callback_data="cq:edit_freq")],
         [InlineKeyboardButton("❌ Отмена", callback_data="cq:cancel")],
     ])
 
@@ -66,6 +79,9 @@ def cq_view_keyboard(q: CustomQuestion) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle_label, callback_data=f"cq:toggle:{q.id}")],
         [InlineKeyboardButton("✏️ Переименовать", callback_data=f"cq:rename:{q.id}")],
+        [InlineKeyboardButton(
+            "🔁 Изменить частоту", callback_data=f"cq:freq:{q.id}"
+        )],
         [InlineKeyboardButton("🗑 Архивировать", callback_data=f"cq:archive:{q.id}")],
         [InlineKeyboardButton("⬅️ К моим вопросам", callback_data="cq:list")],
     ])
@@ -80,6 +96,71 @@ def cq_archive_confirm_keyboard(question_id: int) -> InlineKeyboardMarkup:
             "❌ Отмена", callback_data=f"cq:view:{question_id}"
         )],
     ])
+
+
+# ---------- частота показа ----------
+
+def cq_frequency_keyboard(cancel_data: str = "cq:cancel") -> InlineKeyboardMarkup:
+    """Клавиатура выбора типа частоты. Используется и в FSM создания, и в
+    смене частоты у существующего вопроса. callback: cq:freq_set:<type>."""
+    rows = [
+        [InlineKeyboardButton(
+            "📋 В каждом опросе",
+            callback_data=f"cq:freq_set:{FREQUENCY_EVERY_SURVEY}",
+        )],
+        [InlineKeyboardButton(
+            "🕐 В определённое время дня",
+            callback_data=f"cq:freq_set:{FREQUENCY_NTH_SURVEY}",
+        )],
+        [InlineKeyboardButton(
+            "📅 Раз в N дней (вечером)",
+            callback_data=f"cq:freq_set:{FREQUENCY_EVERY_N_DAYS}",
+        )],
+        [InlineKeyboardButton(
+            "🗓 Раз в неделю (вечером)",
+            callback_data=f"cq:freq_set:{FREQUENCY_WEEKLY}",
+        )],
+        [InlineKeyboardButton(
+            "🗓 Раз в две недели (вечером)",
+            callback_data=f"cq:freq_set:{FREQUENCY_BIWEEKLY}",
+        )],
+        [InlineKeyboardButton("⬅️ Отмена", callback_data=cancel_data)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def cq_nth_survey_keyboard(cancel_data: str = "cq:cancel") -> InlineKeyboardMarkup:
+    """Выбор слота опроса дня: утром / в середине дня / вечером."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🌅 Утром (первый опрос дня)",
+            callback_data=f"cq:freq_n:{SLOT_MORNING}",
+        )],
+        [InlineKeyboardButton(
+            "☀️ В середине дня",
+            callback_data=f"cq:freq_n:{SLOT_MIDDAY}",
+        )],
+        [InlineKeyboardButton(
+            "🌙 Вечером (последний опрос дня)",
+            callback_data=f"cq:freq_n:{SLOT_EVENING}",
+        )],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="cq:freq_back")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=cancel_data)],
+    ])
+
+
+def cq_every_n_days_keyboard(
+    cancel_data: str = "cq:cancel",
+) -> InlineKeyboardMarkup:
+    """Выбор числа дней (EVERY_N_DAYS_MIN..EVERY_N_DAYS_MAX). Раскладка 5 в ряд."""
+    buttons = [
+        InlineKeyboardButton(str(i), callback_data=f"cq:freq_n:{i}")
+        for i in range(EVERY_N_DAYS_MIN, EVERY_N_DAYS_MAX + 1)
+    ]
+    rows = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="cq:freq_back")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data=cancel_data)])
+    return InlineKeyboardMarkup(rows)
 
 
 # ---------- ответы в опросе ----------

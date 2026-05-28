@@ -25,6 +25,14 @@ from bot.database import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "deactivation_reason IS NULL OR deactivation_reason IN ("
+            "'bot_blocked', 'user_deactivated', 'chat_not_found', 'manual_delete'"
+            ")",
+            name="chk_users_deactivation_reason",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_user_id: Mapped[int] = mapped_column(
@@ -35,6 +43,18 @@ class User(Base):
     )
     timezone_set: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    blocked_bot_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deactivation_reason: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -295,7 +315,15 @@ class SurveyAnswer(Base):
 class CustomQuestion(Base):
     """Пользовательские вопросы. Архивирование через is_active=False (soft delete).
     Уникальный частичный индекс по lower(trim(question_text)) WHERE is_active=true
-    создан в миграции 0006."""
+    создан в миграции 0006.
+
+    Поля частоты (миграция 0009):
+    - ask_frequency_type: 'every_survey'|'nth_survey'|'every_n_days'|'weekly'|'biweekly'.
+    - ask_every_n: для 'nth_survey' = 1..13 (номер опроса дня), для 'every_n_days'
+      = 2..30 (число дней); иначе NULL.
+    - last_asked_local_date: локальная дата последнего показа в опросе. Нужна
+      для частот 'every_n_days'|'weekly'|'biweekly'.
+    """
 
     __tablename__ = "custom_questions"
     __table_args__ = (
@@ -306,6 +334,18 @@ class CustomQuestion(Base):
         CheckConstraint(
             "char_length(question_text) BETWEEN 1 AND 150",
             name="ck_custom_q_text_length",
+        ),
+        CheckConstraint(
+            "ask_frequency_type IN ('every_survey', 'nth_survey', 'every_n_days',"
+            " 'weekly', 'biweekly')",
+            name="ck_custom_q_ask_frequency_type",
+        ),
+        CheckConstraint(
+            "(ask_frequency_type = 'nth_survey' AND ask_every_n BETWEEN 1 AND 13)"
+            " OR (ask_frequency_type = 'every_n_days' AND ask_every_n BETWEEN 2 AND 30)"
+            " OR (ask_frequency_type IN ('every_survey', 'weekly', 'biweekly')"
+            " AND ask_every_n IS NULL)",
+            name="ck_custom_q_ask_every_n",
         ),
         Index("ix_custom_questions_user_active", "user_id", "is_active"),
     )
@@ -319,6 +359,11 @@ class CustomQuestion(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ask_frequency_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="every_survey"
+    )
+    ask_every_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_asked_local_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -388,4 +433,128 @@ class CustomQuestionAnswer(Base):
     answer_bool: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+# ---------- menstrual cycle ----------
+
+class MenstrualCycleSettings(Base):
+    """Feature flag и параметры уведомлений менструального цикла.
+
+    Если строки нет — функция считается выключенной (is_enabled=False).
+    """
+
+    __tablename__ = "menstrual_cycle_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "notify_days_before BETWEEN 0 AND 7",
+            name="ck_mcs_notify_days_before",
+        ),
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notify_before_predicted_start: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    notify_on_predicted_start: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    ask_period_end: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    notify_days_before: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=2
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class MenstrualPeriod(Base):
+    """Записи периодов. period_end_date=NULL для открытых.
+    Уникальность активного старта на дату — частичный индекс из миграции 0010.
+    """
+
+    __tablename__ = "menstrual_periods"
+    __table_args__ = (
+        CheckConstraint(
+            "period_end_date IS NULL OR period_end_date >= period_start_date",
+            name="ck_mp_dates",
+        ),
+        CheckConstraint(
+            "source IN ('manual', 'prediction_confirmed', 'imported')",
+            name="ck_mp_source",
+        ),
+        CheckConstraint(
+            "status IN ('confirmed', 'open', 'archived')",
+            name="ck_mp_status",
+        ),
+        Index("ix_menstrual_periods_user_start", "user_id", "period_start_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    period_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="manual"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="confirmed"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class MenstrualCyclePredictionState(Base):
+    """Анти-спам и кэш текущего прогноза. Одна строка на user_id."""
+
+    __tablename__ = "menstrual_cycle_prediction_state"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    predicted_next_start_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
+    predicted_period_end_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
+    last_before_start_notification_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
+    last_start_check_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_end_check_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    start_confirmation_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    end_confirmation_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )

@@ -121,7 +121,10 @@ def _is_active_survey(context: ContextTypes.DEFAULT_TYPE) -> bool:
 # Коды, у которых есть отдельный базовый шаг в опросе — их не нужно дублировать
 # через опциональный механизм, даже если пользователь включил их в настройках.
 # irritability/impulsivity больше не имеют базовых шагов — задаются как опциональные.
-_HANDLED_AS_BASE = {"medications"}
+# menstrual_cycle вынесен в отдельный домен (bot/services/menstrual_cycle_service.py)
+# и не задаётся в ежедневном опросе, даже если пользователь когда-то включил его
+# в user_question_settings.
+_HANDLED_AS_BASE = {"medications", "menstrual_cycle"}
 
 
 def _init_survey(
@@ -130,13 +133,13 @@ def _init_survey(
     """Инициализирует state опроса. Определяет:
     - survey_slot (first/regular/last/single/manual) — влияет на политики;
     - заполнены ли сон и лекарства за локальную дату (для скипа базовых блоков);
-    - план опциональных вопросов c учётом политик показа.
+    - список включенных опциональных вопросов и порядок их прохождения;
+    - какие custom-вопросы подходят по частоте показа для текущего опроса.
     """
     has_sleep = False
     has_med = False
     local_date = None
-    skip_sleep_block = False
-    plan_serialized: list[dict] = []
+    optional_codes: list[str] = []
     custom_qs: list[dict] = []
     try:
         with session_scope() as session:
@@ -215,12 +218,41 @@ def _init_survey(
                 }
                 for step in plan
             ]
-            custom_qs = [
-                {"id": q.id, "text": q.question_text, "type": q.answer_type}
-                for q in custom_question_service.get_enabled(session, user.id)
-            ]
+            # Индекс текущего опроса в локальный день и признак "последний".
+            already_today = survey_service.count_main_entries_for_date(
+                session, user.id, local_date
+            )
+            today_survey_index = already_today + 1
+            settings_obj = survey_service.get_settings(session, user.id)
+            freq_per_day = settings_obj.frequency_per_day if settings_obj else 1
+            # Последний — если этот опрос исчерпывает дневное расписание
+            # (или превышает его, что бывает при ручных опросах сверх плана).
+            is_last_today = today_survey_index >= max(freq_per_day, 1)
+
+            # Custom-вопросы: фильтруем по частоте.
+            enabled_customs = custom_question_service.get_enabled(session, user.id)
+            for q in enabled_customs:
+                if not custom_question_service.should_ask(
+                    q, local_date, today_survey_index, is_last_today,
+                    freq_per_day=freq_per_day,
+                ):
+                    continue
+                custom_qs.append({
+                    "id": q.id,
+                    "text": q.question_text,
+                    "type": q.answer_type,
+                })
+            # Сразу отмечаем, что эти вопросы показаны сегодня — даже если опрос
+            # не дойдёт до конца. Это совпадает с уточнением "по дате последнего
+            # показа в опросе", а не "по дате ответа".
+            if custom_qs:
+                custom_question_service.mark_asked(
+                    session, [c["id"] for c in custom_qs], local_date
+                )
     except Exception:
-        logger.exception("Не удалось определить состояние опроса")
+        logger.exception("Не удалось определить состояние блоков сна/лекарств")
+        today_survey_index = 1
+        is_last_today = False
 
     context.user_data["survey"] = {
         "source": source,
@@ -259,8 +291,8 @@ def _init_survey(
         )
     if custom_qs:
         logger.info(
-            "Опрос tg=%s: подключены custom-вопросы (%d шт)",
-            tg_id, len(custom_qs),
+            "Опрос tg=%s: подключены custom-вопросы (%d шт, опрос дня #%d, last=%s)",
+            tg_id, len(custom_qs), today_survey_index, is_last_today,
         )
 
 

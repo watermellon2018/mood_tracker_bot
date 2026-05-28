@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 SUICIDAL_CODE = "suicidal_thoughts"
 
+# Вопросы каталога, которые не должны появляться в UI настроек опроса
+# (вынесены в отдельные домены). Их можно оставить в БД для совместимости
+# с историческими ответами в survey_answers.
+_HIDDEN_FROM_OPTIONAL_UI = {"menstrual_cycle"}
+
 
 # ---------- catalog ----------
 
@@ -48,34 +53,32 @@ def required_codes(session: Session) -> set[str]:
 def optional_questions_by_category(
     session: Session, category: str
 ) -> list[QuestionCatalog]:
-    return list(
-        session.scalars(
-            select(QuestionCatalog)
-            .where(
-                and_(
-                    QuestionCatalog.category == category,
-                    QuestionCatalog.is_active.is_(True),
-                    QuestionCatalog.is_required.is_(False),
-                )
+    rows = session.scalars(
+        select(QuestionCatalog)
+        .where(
+            and_(
+                QuestionCatalog.category == category,
+                QuestionCatalog.is_active.is_(True),
+                QuestionCatalog.is_required.is_(False),
             )
-            .order_by(QuestionCatalog.sort_order.asc())
         )
+        .order_by(QuestionCatalog.sort_order.asc())
     )
+    return [q for q in rows if q.code not in _HIDDEN_FROM_OPTIONAL_UI]
 
 
 def all_optional_codes(session: Session) -> list[str]:
-    return list(
-        session.scalars(
-            select(QuestionCatalog.code)
-            .where(
-                and_(
-                    QuestionCatalog.is_active.is_(True),
-                    QuestionCatalog.is_required.is_(False),
-                )
+    codes = session.scalars(
+        select(QuestionCatalog.code)
+        .where(
+            and_(
+                QuestionCatalog.is_active.is_(True),
+                QuestionCatalog.is_required.is_(False),
             )
-            .order_by(QuestionCatalog.sort_order.asc())
         )
+        .order_by(QuestionCatalog.sort_order.asc())
     )
+    return [c for c in codes if c not in _HIDDEN_FROM_OPTIONAL_UI]
 
 
 # ---------- user state ----------

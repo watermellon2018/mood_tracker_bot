@@ -2,7 +2,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from bot.constants import (
@@ -63,41 +63,26 @@ def get_settings(session: Session, user_id: int) -> UserSettings | None:
     )
 
 
-def update_last_survey_notification_date(
-    session: Session, user_id: int, value: date
-) -> None:
-    """Обновляет user_settings.last_survey_notification_date. Идемпотентно."""
-    settings = session.scalar(
-        select(UserSettings).where(UserSettings.user_id == user_id)
-    )
-    if settings is None:
-        return
-    if settings.last_survey_notification_date == value:
-        return
-    settings.last_survey_notification_date = value
-    session.flush()
+def count_main_entries_for_date(
+    session: Session, user_id: int, target_date: date
+) -> int:
+    """Сколько уже сохранённых survey_entries за локальный день.
 
-
-def update_survey_frequency(
-    session: Session,
-    user_id: int,
-    frequency_type: str,
-    frequency_days: int | None,
-) -> UserSettings | None:
-    """Обновляет частоту опроса. Возвращает обновлённые settings."""
-    settings = session.scalar(
-        select(UserSettings).where(UserSettings.user_id == user_id)
+    Считаем только sleep_type IN ('main','none') — те, что создаются полным
+    опросом. 'additional' — дополнительный сон, не опрос.
+    """
+    return int(
+        session.scalar(
+            select(func.count(SurveyEntry.id)).where(
+                and_(
+                    SurveyEntry.user_id == user_id,
+                    SurveyEntry.local_date == target_date,
+                    SurveyEntry.sleep_type.in_(("main", "none")),
+                )
+            )
+        )
+        or 0
     )
-    if settings is None:
-        return None
-    settings.survey_frequency_type = frequency_type
-    settings.survey_frequency_days = frequency_days
-    session.flush()
-    logger.info(
-        "Обновлена частота опроса user_id=%s -> type=%s days=%s",
-        user_id, frequency_type, frequency_days,
-    )
-    return settings
 
 
 def has_main_sleep_for_date(

@@ -1,4 +1,4 @@
-"""Handler-ы экрана 'Вопросы опроса'. Без FSM — всё через CallbackQueryHandler
+"""Handler-ы экрана 'Настройки опроса'. Без FSM — всё через CallbackQueryHandler
 с edit_message_text, чтобы не засорять чат."""
 
 import logging
@@ -29,7 +29,7 @@ from bot.services.question_settings_service import SUICIDAL_CODE
 logger = logging.getLogger(__name__)
 
 ROOT_TEXT = (
-    "Вопросы опроса\n\n"
+    "Настройки опроса\n\n"
     "Обязательные вопросы всегда включены:\n"
     "✓ Настроение\n✓ Тревога\n✓ Сон\n✓ Энергия\n✓ Комментарий\n\n"
     "Дополнительные вопросы можно включить или выключить. "

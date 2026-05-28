@@ -28,9 +28,9 @@ from bot.handlers.start import (
     start_command,
 )
 from bot.keyboards.main_menu import (
-    BTN_EXPORT,
     BTN_HELP,
     BTN_PAUSE,
+    BTN_REPORT,
     BTN_RESUME,
     BTN_SETTINGS,
     BTN_STATS,
@@ -38,10 +38,18 @@ from bot.keyboards.main_menu import (
 from bot.handlers.add_sleep import build_add_sleep_conversation
 from bot.handlers.custom_questions import (
     build_cq_create_conversation,
+    build_cq_edit_freq_conversation,
     build_cq_list_entry,
     build_cq_rename_conversation,
     build_cq_router,
 )
+from bot.handlers.cycle import (
+    build_cycle_conversation,
+    build_cycle_open_handler,
+    build_cycle_router,
+)
+from bot.handlers.reports import build_report_handlers
+from bot.services import cycle_scheduler
 from bot.handlers.edit_meds import build_edit_meds_conversation
 from bot.handlers.question_settings import build_qs_handler
 from bot.handlers.stats import stats_handlers
@@ -66,13 +74,14 @@ async def _post_init(application: Application) -> None:
             BotCommand("edit_meds", "Изменить лекарства за сегодня"),
             BotCommand("settings", "Настройки уведомлений"),
             BotCommand("stats", "Статистика"),
-            BotCommand("export", "Экспорт в Excel"),
+            BotCommand("export", "Отчёт: PDF / Excel / Полный"),
             BotCommand("pause", "Отключить уведомления"),
             BotCommand("resume", "Включить уведомления"),
         ]
     )
     scheduler_service.schedule_cleanup(application)
     scheduler_service.reschedule_all(application)
+    cycle_scheduler.reschedule_all_cycles(application)
     logger.info("Бот запущен")
 
 
@@ -105,7 +114,7 @@ def main() -> None:
 
     # Reply-меню у поля ввода: ловим нажатия по точному тексту кнопок.
     # Кнопку BTN_ADD ловит ConversationHandler опроса как entry point.
-    menu_texts = [BTN_STATS, BTN_EXPORT, BTN_SETTINGS, BTN_HELP, BTN_PAUSE, BTN_RESUME]
+    menu_texts = [BTN_STATS, BTN_REPORT, BTN_SETTINGS, BTN_HELP, BTN_PAUSE, BTN_RESUME]
     menu_regex = "^(" + "|".join(re.escape(t) for t in menu_texts) + ")$"
     application.add_handler(
         MessageHandler(filters.Regex(menu_regex), reply_menu_router)
@@ -138,20 +147,35 @@ def main() -> None:
     # Выбор часового пояса (onboarding + смена из настроек).
     application.add_handler(build_timezone_handler())
 
-    # Настройки вопросов опроса.
+    # Пользовательские вопросы и цикл — конкретные qs:* перехватываются ДО
+    # общего qs_router, чтобы pattern ^qs: не поглощал их.
+    application.add_handler(build_cq_list_entry())
+    application.add_handler(build_cycle_open_handler())
+
+    # Настройки вопросов опроса (общий роутер для остальных qs:*).
     application.add_handler(build_qs_handler())
 
     # Пользовательские вопросы. ConversationHandlers первыми — они владеют
-    # cq:add и cq:rename:N, остальные cq:* идёт в общий роутер.
+    # cq:add, cq:rename:N и cq:freq:N, остальные cq:* идут в общий роутер.
     application.add_handler(build_cq_create_conversation())
     application.add_handler(build_cq_rename_conversation())
-    application.add_handler(build_cq_list_entry())
+    application.add_handler(build_cq_edit_freq_conversation())
     application.add_handler(build_cq_router())
+
+    # Менструальный цикл (отдельный домен). ConversationHandler владеет
+    # cycle:enable, cycle:start:custom, cycle:end:custom, cycle:onb:*,
+    # cycle:pred:start:custom; остальные cycle:* идут в общий роутер.
+    application.add_handler(build_cycle_conversation())
+    application.add_handler(build_cycle_router())
 
     # Статистика и экспорт
     for h in stats_handlers():
         application.add_handler(h)
     for h in export_handlers():
+        application.add_handler(h)
+
+    # PDF-отчёт (отдельный домен над статистикой).
+    for h in build_report_handlers():
         application.add_handler(h)
 
     application.add_error_handler(error_handler)

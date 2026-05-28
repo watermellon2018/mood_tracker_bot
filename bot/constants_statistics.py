@@ -52,6 +52,8 @@ STATISTICS_BLOCKS: list[tuple[str, str, str]] = [
     ("aggression_conflicts",   "Агрессия / конфликты",                  "lifestyle"),
     # Пользовательские
     ("custom_questions",       "Пользовательские вопросы",              "custom"),
+    # Менструальный цикл (отдельный домен)
+    ("cycle_summary",          "Менструальный цикл — саммари",          "health"),
 ]
 
 STATISTICS_BLOCK_LABELS: dict[str, str] = {code: label for code, label, _ in STATISTICS_BLOCKS}
@@ -87,6 +89,7 @@ BLOCK_CALLBACK_SHORTS: dict[str, str] = {
     "sleep_problems":        "slp",
     "mood_energy":           "mne",
     "mood_spread":           "msp",
+    "cycle_summary":         "cys",
 }
 # Обратный маппинг: short -> long.
 BLOCK_CALLBACK_LONG: dict[str, str] = {v: k for k, v in BLOCK_CALLBACK_SHORTS.items()}
