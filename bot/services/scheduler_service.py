@@ -58,7 +58,9 @@ def schedule_user(application: Application, user: User, settings: UserSettings) 
 
 def reschedule_all(application: Application) -> None:
     with session_scope() as session:
-        users = session.scalars(select(User)).all()
+        users = session.scalars(
+            select(User).where(User.is_active.is_(True))
+        ).all()
         for user in users:
             settings = survey_service.get_settings(session, user.id)
             if settings is None:
@@ -85,6 +87,7 @@ async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Шлет плановое уведомление с кнопкой и создает pending запись."""
     from bot.keyboards.survey_keyboards import start_survey_keyboard
     from bot.texts import SURVEY_SCHEDULED_INTRO
+    from bot.services.notification_sender import safe_send_message
 
     data = context.job.data or {}
     telegram_user_id = data.get("telegram_user_id")
@@ -96,29 +99,56 @@ async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
             user = survey_service.get_user_by_tg(session, telegram_user_id)
             if user is None:
                 return
+            if not user.is_active:
+                logger.info(
+                    "notification_skipped_inactive_user tg=%s type=scheduled",
+                    telegram_user_id,
+                )
+                # Снимаем jobs пользователя на ближайшее время — больше не
+                # нужно дёргать send_scheduled_survey/send_reminder для него.
+                _remove_user_jobs(context, telegram_user_id)
+                return
             settings = survey_service.get_settings(session, user.id)
             if settings is None or not settings.notifications_enabled:
                 return
-            pending = survey_service.create_pending(
-                session, user.id, datetime.now(timezone.utc)
-            )
-            pending_id = pending.id
             reminder_enabled = settings.reminder_enabled
             reminder_delay = settings.reminder_delay_minutes
     except Exception:
         logger.exception("Ошибка БД при отправке планового опроса")
         return
 
-    try:
-        await context.bot.send_message(
-            chat_id=telegram_user_id,
-            text=SURVEY_SCHEDULED_INTRO,
-            reply_markup=start_survey_keyboard(),
-        )
-        logger.info("Отправлен плановый опрос tg=%s pending=%s", telegram_user_id, pending_id)
-    except Exception:
-        logger.exception("Не удалось отправить плановый опрос tg=%s", telegram_user_id)
+    # 1. Сначала пытаемся отправить — и только при успехе создаём pending.
+    sent = await safe_send_message(
+        context.bot,
+        telegram_user_id,
+        SURVEY_SCHEDULED_INTRO,
+        reply_markup=start_survey_keyboard(),
+        notification_type="scheduled_survey",
+    )
+    if not sent:
+        # safe_send_message сам деактивировал пользователя при Forbidden /
+        # chat-gone. Pending не создаём, чтобы он не оставался висеть.
         return
+
+    # 2. Pending после успешной отправки.
+    try:
+        with session_scope() as session:
+            user = survey_service.get_user_by_tg(session, telegram_user_id)
+            if user is None or not user.is_active:
+                return
+            pending = survey_service.create_pending(
+                session, user.id, datetime.now(timezone.utc)
+            )
+            pending_id = pending.id
+    except Exception:
+        logger.exception(
+            "Ошибка создания pending после отправки tg=%s", telegram_user_id
+        )
+        return
+
+    logger.info(
+        "scheduled_notification_sent tg=%s pending=%s", telegram_user_id, pending_id
+    )
 
     if reminder_enabled:
         context.job_queue.run_once(
@@ -135,6 +165,7 @@ async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     from bot.keyboards.survey_keyboards import start_survey_keyboard
     from bot.texts import SURVEY_REMINDER
+    from bot.services.notification_sender import safe_send_message
 
     data = context.job.data or {}
     telegram_user_id = data.get("telegram_user_id")
@@ -146,28 +177,67 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         with session_scope() as session:
             from bot.models import PendingSurvey
 
+            user = survey_service.get_user_by_tg(session, telegram_user_id)
+            if user is None or not user.is_active:
+                logger.info(
+                    "notification_skipped_inactive_user tg=%s type=reminder",
+                    telegram_user_id,
+                )
+                _remove_user_jobs(context, telegram_user_id)
+                return
             pending = session.get(PendingSurvey, pending_id)
             if pending is None or pending.status != PENDING_STATUS:
                 # Уже завершен или истек — ничего не делаем.
                 return
-            survey_service.mark_pending_reminder_sent(session, pending_id)
     except Exception:
         logger.exception("Ошибка БД при отправке напоминания")
         return
 
+    sent = await safe_send_message(
+        context.bot,
+        telegram_user_id,
+        SURVEY_REMINDER,
+        reply_markup=start_survey_keyboard(),
+        notification_type="reminder",
+    )
+    if not sent:
+        # Не помечаем pending как reminder_sent — попробуем в следующий цикл.
+        return
+
     try:
-        await context.bot.send_message(
-            chat_id=telegram_user_id,
-            text=SURVEY_REMINDER,
-            reply_markup=start_survey_keyboard(),
-        )
-        logger.info(
-            "Отправлено повторное напоминание tg=%s pending=%s",
-            telegram_user_id,
+        with session_scope() as session:
+            survey_service.mark_pending_reminder_sent(session, pending_id)
+    except Exception:
+        logger.exception(
+            "Ошибка пометки pending=%s reminder_sent после успешной отправки",
             pending_id,
         )
-    except Exception:
-        logger.exception("Не удалось отправить напоминание tg=%s", telegram_user_id)
+        return
+
+    logger.info(
+        "reminder_notification_sent tg=%s pending=%s",
+        telegram_user_id, pending_id,
+    )
+
+
+def _remove_user_jobs(
+    context: ContextTypes.DEFAULT_TYPE, telegram_user_id: int
+) -> None:
+    """Снимает все pending jobs пользователя: расписание + cycle daily.
+    Используется когда мы знаем, что пользователь стал inactive, чтобы
+    лишние job не дёргали send_scheduled_survey / cycle_daily_check.
+    """
+    from bot.services.cycle_scheduler import CYCLE_JOB_PREFIX
+
+    jq = context.job_queue
+    if jq is None:
+        return
+    name = f"{SCHEDULED_JOB_PREFIX}{telegram_user_id}"
+    for job in jq.get_jobs_by_name(name):
+        job.schedule_removal()
+    cycle_name = f"{CYCLE_JOB_PREFIX}{telegram_user_id}"
+    for job in jq.get_jobs_by_name(cycle_name):
+        job.schedule_removal()
 
 
 async def cleanup_expired_pendings(context: ContextTypes.DEFAULT_TYPE) -> None:

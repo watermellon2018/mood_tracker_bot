@@ -19,7 +19,7 @@ def settings_menu_keyboard(
         [   InlineKeyboardButton("Часовой пояс", callback_data="set:tz"),
             InlineKeyboardButton(notif_label, callback_data="set:toggle_notif")],
         [InlineKeyboardButton(rem_label, callback_data="set:toggle_rem")],
-        [InlineKeyboardButton("Вопросы опроса", callback_data="qs:menu")],
+        [InlineKeyboardButton("Настройки опроса", callback_data="qs:menu")],
     ]
     return InlineKeyboardMarkup(rows)
 

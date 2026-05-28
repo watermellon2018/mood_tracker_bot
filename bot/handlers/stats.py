@@ -32,7 +32,11 @@ from bot.services import (
     stats_service,
     survey_service,
 )
-from bot.services.statistics_renderer import SUMMARY_SENTINEL
+from bot.services.statistics_renderer import (
+    CYCLE_SUMMARY_SENTINEL,
+    SUMMARY_SENTINEL,
+)
+from bot.services import menstrual_cycle_service as mcs
 from bot.texts import (
     DISCLAIMER_FOOTER,
     ERR_GENERIC,
@@ -168,6 +172,59 @@ def _get_user_id(tg_id: int) -> int:
             session, tg_id, config.DEFAULT_TIMEZONE
         )
         return user.id
+
+
+def _build_cycle_text(user_id: int, user_tz: str) -> str | None:
+    """Текстовое саммари по циклу. None — если функция выключена и данных нет."""
+    from bot.utils.time_utils import user_local_date
+
+    try:
+        with session_scope() as session:
+            local_today = user_local_date(user_tz)
+            summary = mcs.get_cycle_summary(session, user_id, local_today)
+    except Exception:
+        logger.exception("Ошибка _build_cycle_text user_id=%s", user_id)
+        return None
+
+    if not summary["is_enabled"] and summary["latest_period_start"] is None:
+        return None  # функция выключена и нечего показать
+
+    lines = ["🌙 Менструальный цикл"]
+    if summary["cycle_day"] is not None:
+        lines.append(f"Текущий день цикла: {summary['cycle_day']}")
+    if summary["latest_period_start"]:
+        lines.append(
+            f"Последнее начало: "
+            f"{summary['latest_period_start'].strftime('%d.%m.%Y')}"
+        )
+    if summary["latest_period_end"]:
+        lines.append(
+            f"Последнее окончание: "
+            f"{summary['latest_period_end'].strftime('%d.%m.%Y')}"
+        )
+    if summary["median_cycle_length"]:
+        lines.append(f"Медианная длина цикла: {summary['median_cycle_length']} дн.")
+    if summary["median_period_length"]:
+        lines.append(
+            f"Медианная длительность месячных: "
+            f"{summary['median_period_length']} дн."
+        )
+    if summary["predicted_next_start"]:
+        prefix = "Примерное"
+        if summary["low_confidence"]:
+            prefix = "Стандартный 28-дн. расчёт — примерное"
+        lines.append(
+            f"{prefix} следующее начало: "
+            f"{summary['predicted_next_start'].strftime('%d.%m.%Y')}"
+        )
+    if summary["low_confidence"]:
+        lines.append("")
+        lines.append(
+            "Пока мало данных для надёжного прогноза. "
+            "Я использую стандартное значение 28 дней, пока вы не отметите "
+            "несколько циклов."
+        )
+    return "\n".join(lines)
 
 
 # ---------- period callbacks: stbrief/stsel/stfull ----------
@@ -309,6 +366,12 @@ async def _send_report(
                         chat_id=tg_id, text=summary_text
                     )
                     summary_sent = True
+                elif item == CYCLE_SUMMARY_SENTINEL:
+                    cycle_text = _build_cycle_text(user_id, user_tz)
+                    if cycle_text is not None:
+                        await context.bot.send_message(
+                            chat_id=tg_id, text=cycle_text
+                        )
                 else:
                     plot_paths.append(item)
 

@@ -2,7 +2,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from bot.constants import (
@@ -60,6 +60,28 @@ def set_user_timezone(session: Session, telegram_user_id: int, tz_name: str) -> 
 def get_settings(session: Session, user_id: int) -> UserSettings | None:
     return session.scalar(
         select(UserSettings).where(UserSettings.user_id == user_id)
+    )
+
+
+def count_main_entries_for_date(
+    session: Session, user_id: int, target_date: date
+) -> int:
+    """Сколько уже сохранённых survey_entries за локальный день.
+
+    Считаем только sleep_type IN ('main','none') — те, что создаются полным
+    опросом. 'additional' — дополнительный сон, не опрос.
+    """
+    return int(
+        session.scalar(
+            select(func.count(SurveyEntry.id)).where(
+                and_(
+                    SurveyEntry.user_id == user_id,
+                    SurveyEntry.local_date == target_date,
+                    SurveyEntry.sleep_type.in_(("main", "none")),
+                )
+            )
+        )
+        or 0
     )
 
 

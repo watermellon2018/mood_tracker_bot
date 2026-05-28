@@ -23,12 +23,22 @@ logger = logging.getLogger(__name__)
 
 # Маркер текстового summary (не PNG).
 SUMMARY_SENTINEL = "__summary__"
+# Маркер текстового саммари по циклу. Обрабатывается в handlers/stats.py:
+# собирает summary из menstrual_cycle_service и шлёт сообщением.
+CYCLE_SUMMARY_SENTINEL = "__cycle_summary__"
 
 
 # --- адаптеры. Каждый рендер унифицирован: ctx -> list[str].
 
 def _r_summary(ctx: dict) -> list[str]:
     return [SUMMARY_SENTINEL]
+
+
+def _r_cycle_summary(ctx: dict) -> list[str]:
+    """Текстовое саммари по менструальному циклу. Сам текст собирается в
+    handler-е статистики (ему нужен session-доступ). Если функция выключена
+    и нет данных — handler пропустит блок."""
+    return [CYCLE_SUMMARY_SENTINEL]
 
 
 def _r_mood(ctx: dict) -> list[str]:
@@ -125,6 +135,7 @@ STATISTICS_BLOCK_RENDERERS: dict[str, Callable[[dict], list[str]]] = {
     "mood_spread":      _r_mood_spread,
     "sleep_problems":   _r_sleep_problems,
     "custom_questions": _r_custom_questions,
+    "cycle_summary":    _r_cycle_summary,
 }
 
 # system optional коды (EAV) — рендерятся универсально по question_code.
