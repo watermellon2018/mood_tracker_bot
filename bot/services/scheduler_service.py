@@ -148,7 +148,7 @@ async def send_scheduled_survey(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.bot,
         telegram_user_id,
         SURVEY_SCHEDULED_INTRO,
-        reply_markup=start_survey_keyboard(),
+        reply_markup=start_survey_keyboard(survey_slot),
         notification_type="scheduled_survey",
     )
     if not sent:
@@ -226,7 +226,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.bot,
         telegram_user_id,
         SURVEY_REMINDER,
-        reply_markup=start_survey_keyboard(),
+        reply_markup=start_survey_keyboard(survey_slot),
         notification_type="reminder",
     )
     if not sent:

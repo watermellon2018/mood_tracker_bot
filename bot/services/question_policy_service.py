@@ -23,8 +23,10 @@ from sqlalchemy.orm import Session
 from bot.constants_questions import (
     ASK_POLICY_FIRST_UNTIL_ANSWERED,
     ASK_POLICY_LAST_OF_DAY,
+    ASK_POLICY_LAST_OR_AFTER_NOON,
     ASK_POLICY_ONCE_PER_DAY,
     ASK_POLICY_PER_SURVEY,
+    NOON_HOUR,
     OPTIONAL_QUESTION_ORDER,
     SURVEY_SLOT_FIRST,
     SURVEY_SLOT_LAST,
@@ -126,9 +128,16 @@ _FIRST_ALLOWED_SLOTS = frozenset({
 _LAST_ALLOWED_SLOTS = frozenset({SURVEY_SLOT_LAST, SURVEY_SLOT_SINGLE})
 
 
-def should_ask_question_in_slot(ask_policy: str, survey_slot: str) -> bool:
+def should_ask_question_in_slot(
+    ask_policy: str, survey_slot: str, local_now: time | None = None
+) -> bool:
     """Можно ли в данном слоте задавать вопрос с этой политикой.
     Игнорирует наличие ответа — это отдельная проверка.
+
+    local_now — локальное время ОТКРЫТИЯ опроса пользователем. Нужно только
+    для ASK_POLICY_LAST_OR_AFTER_NOON. Если не передано — этот режим
+    деградирует до last-only (консервативно: не задаём итоговый вопрос утром,
+    раз время неизвестно).
     """
     if ask_policy == ASK_POLICY_PER_SURVEY:
         return True
@@ -138,6 +147,10 @@ def should_ask_question_in_slot(ask_policy: str, survey_slot: str) -> bool:
         return survey_slot in _FIRST_ALLOWED_SLOTS
     if ask_policy == ASK_POLICY_LAST_OF_DAY:
         return survey_slot in _LAST_ALLOWED_SLOTS
+    if ask_policy == ASK_POLICY_LAST_OR_AFTER_NOON:
+        if survey_slot in _LAST_ALLOWED_SLOTS:
+            return True
+        return local_now is not None and local_now.hour >= NOON_HOUR
     # Неизвестная политика — на всякий случай не задаём, чтобы не дёргать
     # пользователя зря.
     logger.warning("Unknown ask_policy=%s — skip", ask_policy)
@@ -201,6 +214,7 @@ def build_daily_survey_steps(
     enabled_codes: set[str],
     survey_slot: str,
     local_today: date,
+    local_now: time | None = None,
 ) -> list[SurveyStep]:
     """Собирает список опциональных шагов для текущего запуска опроса.
 
@@ -208,9 +222,10 @@ def build_daily_survey_steps(
       - порядок из OPTIONAL_QUESTION_ORDER;
       - ask_policy (через should_ask_question_in_slot);
       - наличие ответа за target_date для once_per_day /
-        first_survey_until_answered / last_survey_of_day.
+        first_survey_until_answered / last_survey_of_day / last_or_after_noon.
 
     enabled_codes — включённые пользователем опциональные коды.
+    local_now — локальное время открытия опроса; нужно для last_or_after_noon.
     """
     plan: list[SurveyStep] = []
     for code in OPTIONAL_QUESTION_ORDER:
@@ -218,7 +233,7 @@ def build_daily_survey_steps(
             continue
 
         ask_policy = get_ask_policy(code)
-        if not should_ask_question_in_slot(ask_policy, survey_slot):
+        if not should_ask_question_in_slot(ask_policy, survey_slot, local_now):
             logger.info(
                 "skip code=%s: ask_policy=%s не подходит для slot=%s",
                 code, ask_policy, survey_slot,
@@ -233,6 +248,7 @@ def build_daily_survey_steps(
             ASK_POLICY_ONCE_PER_DAY,
             ASK_POLICY_FIRST_UNTIL_ANSWERED,
             ASK_POLICY_LAST_OF_DAY,
+            ASK_POLICY_LAST_OR_AFTER_NOON,
         ):
             if has_answer_for_question_date(
                 session, user_id, code, target_date

@@ -209,6 +209,8 @@ def _init_survey(
                 enabled_codes=policy_input,
                 survey_slot=survey_slot,
                 local_today=local_date,
+                # Время открытия опроса — для last_or_after_noon (порог 12:00).
+                local_now=local_now.time(),
             )
             plan_serialized = [
                 {
