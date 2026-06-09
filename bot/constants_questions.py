@@ -128,11 +128,11 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
         "options": ["Не было", "Снижен", "Обычный", "Повышен", "Очень повышен"],
     },
     "concentration": {
-        "question_text": "Получалось ли сегодня сосредоточиться на задачах?",
+        "question_text": "Оцени уровень концентрации?",
         "options": ["Совсем нет", "С трудом", "Иногда", "Нормально", "Хорошо"],
     },
     "productivity": {
-        "question_text": "Насколько продуктивно прошёл день?",
+        "question_text": "Насколько ты продуктивен?",
         "options": ["Ничего", "Мало", "Средне", "Много", "Очень много"],
     },
     "social_activity": {
@@ -144,7 +144,7 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
         "options": ["Нет", "Близко к атаке", "Была одна", "Несколько", "Сильные"],
     },
     "obsessive_thoughts": {
-        "question_text": "Сегодня были ли навязчивые мысли?",
+        "question_text": "Есть ли навязчивые мысли?",
         "options": ["Нет", "Редкие", "Иногда", "Часто", "Постоянно"],
     },
     "avoidance": {
@@ -156,7 +156,7 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
         "options": ["Нет", "Слабые", "Умеренные", "Сильные", "Очень сильные"],
     },
     "hypomania": {
-        "question_text": "Были ли сегодня признаки подъёма / гипомании?",
+        "question_text": "Замечены ли признаки гипомании?",
         "options": ["Нет", "Намёк", "Заметно", "Сильно", "Очень сильно"],
     },
     "thought_speech_speed": {
@@ -168,7 +168,7 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
         "options": ["Нет", "Лёгкая", "Умеренная", "Сильная", "Очень сильная"],
     },
     "impulsivity": {
-        "question_text": "Насколько сегодня была импульсивность?",
+        "question_text": "Насколько сегодня ты импульсивен?",
         "options": ["Нет", "Немного", "Умеренно", "Заметно", "Сильно"],
     },
     "libido": {
@@ -200,7 +200,7 @@ QUESTION_DEFINITIONS: dict[str, dict] = {
     "physical_activity": {
         # Спец-вопрос: вместо одной шкалы — двухшаговый поток
         # (done? -> duration?). См. PHYSICAL_ACTIVITY_*.
-        "question_text": "Была ли сегодня физическая активность?",
+        "question_text": "Была ли физ нагрузка?",
         "options": ["Да", "Нет"],
         "option_codes": ["yes", "no"],
     },
@@ -329,7 +329,11 @@ def option_codes_for(code: str) -> list[str] | None:
 #   'first_survey_until_answered' — задавать в первом опросе дня; пока ответа
 #                                   нет — повторять в каждом следующем опросе
 #                                   ТОГО ЖЕ дня; на следующий день не переносим;
-#   'last_survey_of_day'          — только в последнем опросе дня.
+#   'last_survey_of_day'          — только в последнем опросе дня;
+#   'last_or_after_noon'          — в последнем (last/single) опросе ИЛИ в любом
+#                                   опросе, открытом не раньше NOON_HOUR (12:00).
+#                                   Для вопросов-итогов, которые утром задавать
+#                                   рано, но к середине дня уже осмысленны.
 #
 # Возможные значения answer_target_date_policy:
 #   'current_day'  — ответ относится к сегодняшнему локальному дню;
@@ -339,6 +343,14 @@ ASK_POLICY_PER_SURVEY = "per_survey"
 ASK_POLICY_ONCE_PER_DAY = "once_per_day"
 ASK_POLICY_FIRST_UNTIL_ANSWERED = "first_survey_until_answered"
 ASK_POLICY_LAST_OF_DAY = "last_survey_of_day"
+ASK_POLICY_LAST_OR_AFTER_NOON = "last_or_after_noon"
+
+# Порог «дня» для ASK_POLICY_LAST_OR_AFTER_NOON: опрос, открытый в этот час
+# или позже по локальному времени пользователя, считается «не утренним», и
+# вопросы-итоги в нём задаются даже если слот не последний. Час, не time(),
+# чтобы не тянуть datetime в этот UI-модуль — сравнение делает
+# question_policy_service.
+NOON_HOUR = 12
 
 TARGET_DATE_CURRENT = "current_day"
 TARGET_DATE_PREVIOUS = "previous_day"
@@ -373,17 +385,21 @@ QUESTION_POLICIES: dict[str, dict[str, str]] = {
     "medications":     {"ask": ASK_POLICY_ONCE_PER_DAY,        "target": TARGET_DATE_CURRENT},
     # first_survey_until_answered — про "вчера", пока не ответили.
     "late_phone":      {"ask": ASK_POLICY_FIRST_UNTIL_ANSWERED, "target": TARGET_DATE_PREVIOUS},
+    # last_or_after_noon — итоги, осмысленные с середины дня: задаются в
+    # последнем опросе ИЛИ в любом опросе, открытом не раньше NOON_HOUR.
+    "productivity":        {"ask": ASK_POLICY_LAST_OR_AFTER_NOON, "target": TARGET_DATE_CURRENT},
+    "concentration":       {"ask": ASK_POLICY_LAST_OR_AFTER_NOON, "target": TARGET_DATE_CURRENT},
+    "hypomania":           {"ask": ASK_POLICY_LAST_OR_AFTER_NOON, "target": TARGET_DATE_CURRENT},
+    "physical_activity":   {"ask": ASK_POLICY_LAST_OR_AFTER_NOON, "target": TARGET_DATE_CURRENT},
+    # per_survey — состояние «сейчас», валидно и утром. Указан явно (хотя это
+    # и default), чтобы зафиксировать осознанный выбор против last_of_day.
+    "obsessive_thoughts":  {"ask": ASK_POLICY_PER_SURVEY, "target": TARGET_DATE_CURRENT},
     # last_survey_of_day — дневные итоги. Задаются только в last/single слоте.
     "anhedonia":           {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
-    "concentration":       {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
-    "productivity":        {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "social_activity":     {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
-    "obsessive_thoughts":  {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
-    "hypomania":           {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "impulsivity":         {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "risky_behavior":      {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "spending":            {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
-    "physical_activity":   {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "substances":          {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "caffeine":            {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
     "stress_events":       {"ask": ASK_POLICY_LAST_OF_DAY, "target": TARGET_DATE_CURRENT},
@@ -404,7 +420,7 @@ def get_target_date_policy(code: str) -> str:
 
 # ---------- Physical activity (двухшаговый ответ) ----------
 
-PHYSICAL_ACTIVITY_QUESTION = "Была ли сегодня физическая активность?"
+PHYSICAL_ACTIVITY_QUESTION = "Была ли физ нагрузка?"
 PHYSICAL_ACTIVITY_DURATION_QUESTION = "Сколько примерно по времени?"
 
 PHYSICAL_ACTIVITY_DURATION_OPTIONS = [
