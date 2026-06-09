@@ -31,6 +31,8 @@ _LAST_ALLOWED_SLOTS  = {last, single}
 
 `NOON_HOUR` определён в `bot/constants_questions.py` (целый час, не `time()`, чтобы не тянуть `datetime` в UI-модуль; сравнение делает `question_policy_service`).
 
+> **БД-констрейнт.** На колонку `question_catalog.ask_policy` в миграции 0009 заведён CHECK `chk_question_ask_policy` — whitelist допустимых значений. Миграция 0015 пересоздаёт его, добавив `last_or_after_noon`. Если будешь вводить ещё одну `ask_policy`, миграция обязана пересоздать констрейнт (DROP IF EXISTS + ADD) **до** UPDATE строк — иначе UPDATE упадёт с `CheckViolation` (ровно так и сломался первый деплой 0015).
+
 ## answer_target_date_policy — к какому дню относится ответ
 
 | Код | Семантика |

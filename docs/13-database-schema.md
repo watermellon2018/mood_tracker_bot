@@ -118,13 +118,15 @@ pending ─ (delay) ─→ reminder_sent ─ (answer) ─→ completed
 | is_default_enabled | Boolean |
 | is_active | Boolean |
 | sort_order | Integer |
-| ask_policy (0009) | String(64) — IN (per_survey, once_per_day, first_survey_until_answered, last_survey_of_day) |
+| ask_policy (0009, 0015) | String(64) — CHECK chk_question_ask_policy: IN (per_survey, once_per_day, first_survey_until_answered, last_survey_of_day, last_or_after_noon) |
 | answer_target_date_policy (0009) | String(64) — IN (current_day, previous_day) |
 | created_at, updated_at | TZ-aware |
 
 Seed-данные — 5 базовых (mood/anxiety/sleep/energy/comment) + 27 опциональных. См. `CATALOG_ROWS` в [migrations/versions/0004_question_catalog.py](../migrations/versions/0004_question_catalog.py).
 
-Политики обновляются в 0009 (seed для late_phone, sleep, medications, и др.) и 0011 (большая группа в `last_survey_of_day`).
+Политики обновляются в 0009 (seed для late_phone, sleep, medications, и др.), 0011 (большая группа в `last_survey_of_day`) и 0015 (`last_or_after_noon` для productivity/concentration/hypomania/physical_activity, `obsessive_thoughts` обратно в `per_survey`).
+
+**CHECK-констрейнт `chk_question_ask_policy`** (whitelist значений `ask_policy`) заведён в 0009 и РАСШИРЯЕТСЯ в 0015 значением `last_or_after_noon`. Любая будущая миграция, добавляющая новое значение `ask_policy`, обязана сначала пересоздать этот констрейнт (DROP IF EXISTS + ADD) ДО UPDATE, иначе UPDATE упадёт с CheckViolation.
 
 ## user_question_settings
 
