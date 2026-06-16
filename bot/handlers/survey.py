@@ -141,6 +141,12 @@ def _init_survey(
     local_date = None
     optional_codes: list[str] = []
     custom_qs: list[dict] = []
+    # Дефолты на случай сбоя БД внутри try: иначе except (ниже) не задаёт
+    # skip_sleep_block/plan_serialized, и сборка survey-state упала бы с
+    # NameError — а survey_start_callback к этому моменту уже сбросил старый
+    # state (pop), оставив пользователя совсем без опроса.
+    skip_sleep_block = True  # безопасно: просто пропустить блок сна
+    plan_serialized: list[dict] = []  # без опциональных шагов
     try:
         with session_scope() as session:
             user = survey_service.get_or_create_user(
