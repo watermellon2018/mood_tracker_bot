@@ -10,6 +10,10 @@ PENDING_STATUS = "pending"
 REMINDER_SENT_STATUS = "reminder_sent"
 COMPLETED_STATUS = "completed"
 EXPIRED_STATUS = "expired"
+# Опрос был перезапущен кнопкой напоминания, пока старый не завершился.
+# Снимает старый pending из активных, чтобы его reminder-джоба не сработала
+# повторно. Колонка status — String(16) без CHECK, миграция не нужна.
+ABANDONED_STATUS = "abandoned"
 
 # Длительность сна
 SLEEP_DURATION_CATEGORIES = [

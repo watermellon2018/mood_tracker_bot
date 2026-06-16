@@ -118,6 +118,75 @@ def _is_active_survey(context: ContextTypes.DEFAULT_TYPE) -> bool:
     return bool(context.user_data.get("survey"))
 
 
+def _remember_question_msg(context: ContextTypes.DEFAULT_TYPE, message) -> None:
+    """Запоминает message_id последнего вопроса с активной клавиатурой.
+
+    Нужно, чтобы отвергать нажатия на «стейл»-кнопки: если пользователь
+    перезапустил опрос (allow_reentry=True), у брошенного опроса на экране
+    могла остаться живая клавиатура той же фазы. Нажатие на неё пришло бы с
+    другим message_id и иначе перезаписало бы свежий опрос. См. _is_stale_press.
+    """
+    survey = context.user_data.get("survey")
+    if survey is not None and message is not None:
+        survey["q_msg_id"] = message.message_id
+
+
+def _is_stale_press(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True, если callback пришёл со старого сообщения, не из текущего опроса.
+
+    Сравнивает message_id нажатой кнопки с запомненным q_msg_id активного
+    опроса. Если опроса нет или id не совпал — это стейл-нажатие (например, на
+    клавиатуру брошенного опроса после рестарта); тихо игнорируем, чтобы не
+    портить state свежего опроса. Кнопку гасим answer(), чтобы у юзера не висели
+    часики. q_msg_id отсутствует только до первого вопроса — тогда не блокируем.
+    """
+    query = update.callback_query
+    survey = context.user_data.get("survey")
+    if survey is None:
+        return True
+    expected = survey.get("q_msg_id")
+    if expected is None:
+        return False
+    if query.message is None or query.message.message_id != expected:
+        logger.info(
+            "Игнорирую стейл-нажатие tg=%s: msg=%s ожидался=%s",
+            update.effective_user.id,
+            getattr(query.message, "message_id", None),
+            expected,
+        )
+        return True
+    return False
+
+
+def _is_stale_unfinished_press(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """True, если нажатие unfinished:resume|restart пришло со старого сообщения.
+
+    Аналог _is_stale_press, но сверяет с unfinished_msg_id — id «незавершённого»
+    сообщения, показанного последним /add. Если опроса нет или id не совпал
+    (например, клавиатура осталась от прерванного рестартом опроса) — стейл.
+    unfinished_msg_id=None означает, что текущий опрос не показывал этот диалог;
+    тогда любое такое нажатие тоже стейл (кнопка не из этого опроса).
+    """
+    query = update.callback_query
+    survey = context.user_data.get("survey")
+    if survey is None:
+        return True
+    expected = survey.get("unfinished_msg_id")
+    if expected is None:
+        return True
+    if query.message is None or query.message.message_id != expected:
+        logger.info(
+            "Игнорирую стейл-нажатие unfinished tg=%s: msg=%s ожидался=%s",
+            update.effective_user.id,
+            getattr(query.message, "message_id", None),
+            expected,
+        )
+        return True
+    return False
+
+
 # Коды, у которых есть отдельный базовый шаг в опросе — их не нужно дублировать
 # через опциональный механизм, даже если пользователь включил их в настройках.
 # irritability/impulsivity больше не имеют базовых шагов — задаются как опциональные.
@@ -141,6 +210,12 @@ def _init_survey(
     local_date = None
     optional_codes: list[str] = []
     custom_qs: list[dict] = []
+    # Дефолты на случай сбоя БД внутри try: иначе except (ниже) не задаёт
+    # skip_sleep_block/plan_serialized, и сборка survey-state упала бы с
+    # NameError — а survey_start_callback к этому моменту уже сбросил старый
+    # state (pop), оставив пользователя совсем без опроса.
+    skip_sleep_block = True  # безопасно: просто пропустить блок сна
+    plan_serialized: list[dict] = []  # без опциональных шагов
     try:
         with session_scope() as session:
             user = survey_service.get_or_create_user(
@@ -279,6 +354,12 @@ def _init_survey(
         "custom_idx": 0,
         "custom_answers": [],
         "high_risk_triggered": False,
+        # message_id последнего вопроса с активной клавиатурой — для отсева
+        # стейл-нажатий после рестарта опроса. См. _remember_question_msg.
+        "q_msg_id": None,
+        # message_id «незавершённого» сообщения от /add (resume/restart) —
+        # чтобы unfinished_choice_callback отсеивал старые такие нажатия.
+        "unfinished_msg_id": None,
     }
     if plan_serialized:
         logger.info(
@@ -321,43 +402,74 @@ def _parse_slot_from_callback(data: str) -> str:
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if _is_active_survey(context):
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             UNFINISHED_SURVEY, reply_markup=unfinished_survey_keyboard()
         )
+        # Запоминаем id именно этого «незавершённого» сообщения, чтобы
+        # unfinished_choice_callback мог отвергнуть нажатие на СТАРОЕ такое
+        # сообщение (после рестарта опроса осталась его живая клавиатура).
+        context.user_data["survey"]["unfinished_msg_id"] = msg.message_id
         return ConversationHandler.END
     _init_survey(
         context, SOURCE_MANUAL, update.effective_user.id, SURVEY_SLOT_MANUAL
     )
     await update.message.reply_text(SURVEY_INTRO)
-    await update.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+    msg = await update.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+    _remember_question_msg(context, msg)
     return MOOD
 
 
 async def survey_start_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Запуск опроса по кнопке из планового уведомления."""
+    """Запуск опроса по кнопке из планового уведомления.
+
+    Кнопка из напоминания всегда начинает новый опрос: если пользователь
+    застрял в незавершённом диалоге (бросил прошлый опрос на полушаге), мы
+    молча прерываем его и стартуем заново. Раньше при allow_reentry=False
+    застрявший пользователь не мог запустить опрос вовсе — кнопка «не
+    работала». _init_survey пересоздаёт survey-state с нуля, так что сбросить
+    старый безопасно. Защита _is_active_survey остаётся на ручном /add.
+    """
     query = update.callback_query
     await query.answer()
-    if _is_active_survey(context):
-        await query.message.reply_text(
-            UNFINISHED_SURVEY, reply_markup=unfinished_survey_keyboard()
+    interrupted = _is_active_survey(context)
+    if interrupted:
+        logger.info(
+            "Кнопка опроса из напоминания: прерываю незавершённый диалог tg=%s",
+            update.effective_user.id,
         )
-        return ConversationHandler.END
+        context.user_data.pop("survey", None)
     survey_slot = _parse_slot_from_callback(query.data)
     # Источник: если есть pending в статусе reminder_sent — это reminder.
     source = SOURCE_SCHEDULED
+    abandoned_pending_id = None
     try:
         with session_scope() as session:
             user = survey_service.get_user_by_tg(session, update.effective_user.id)
             if user is not None:
                 pending = survey_service.latest_pending(session, user.id)
+                # Атрибуция источника одинакова в обоих случаях: если активный
+                # pending уже в reminder_sent — опрос запущен из напоминания.
                 if pending is not None and pending.status == "reminder_sent":
                     source = SOURCE_REMINDER
+                # Если прерываем незавершённый опрос — снимаем его старый pending
+                # из активных (status='abandoned'), чтобы reminder-джоба не
+                # сработала повторно. Делаем после чтения status выше.
+                if interrupted:
+                    abandoned_pending_id = survey_service.mark_pending_abandoned(
+                        session, user.id
+                    )
     except Exception:
         logger.exception("Ошибка определения source при запуске опроса")
+    # Отмену джобы делаем вне session_scope (job_queue, не БД).
+    if abandoned_pending_id is not None:
+        reminder_service.cancel_reminder_for_pending(
+            context.application, abandoned_pending_id
+        )
     _init_survey(context, source, update.effective_user.id, survey_slot)
-    await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+    msg = await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+    _remember_question_msg(context, msg)
     return MOOD
 
 
@@ -366,6 +478,10 @@ async def unfinished_choice_callback(
 ) -> int:
     query = update.callback_query
     await query.answer()
+    # Отвергаем нажатие на СТАРОЕ «незавершённое» сообщение (после рестарта опроса
+    # его клавиатура могла остаться живой). Тихо закрываем, не трогая state.
+    if _is_stale_unfinished_press(update, context):
+        return ConversationHandler.END
     choice = query.data.split(":", 1)[1]
     if choice == "resume":
         # Просто покажем текущий шаг — для простоты MVP начинаем сначала.
@@ -374,14 +490,16 @@ async def unfinished_choice_callback(
         await query.message.reply_text(
             "Продолжаем. Ответь на следующий вопрос."
         )
-        await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+        msg = await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+        _remember_question_msg(context, msg)
         return MOOD
     else:
         context.user_data.pop("survey", None)
         _init_survey(
             context, SOURCE_MANUAL, update.effective_user.id, SURVEY_SLOT_MANUAL
         )
-        await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+        msg = await query.message.reply_text(Q_MOOD, reply_markup=mood_keyboard())
+        _remember_question_msg(context, msg)
         return MOOD
 
 
@@ -390,26 +508,34 @@ async def unfinished_choice_callback(
 async def mood_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return MOOD
     value = int(query.data.split(":")[1])
     context.user_data["survey"]["mood"] = value
     await query.edit_message_text(f"{Q_MOOD}\n\nВыбрано: {value}")
-    await query.message.reply_text(Q_ANXIETY, reply_markup=anxiety_keyboard())
+    msg = await query.message.reply_text(Q_ANXIETY, reply_markup=anxiety_keyboard())
+    _remember_question_msg(context, msg)
     return ANXIETY
 
 
 async def anxiety_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return ANXIETY
     value = int(query.data.split(":")[1])
     context.user_data["survey"]["anxiety"] = value
     await query.edit_message_text(f"{Q_ANXIETY}\n\nВыбрано: {value}")
-    await query.message.reply_text(Q_ENERGY, reply_markup=energy_keyboard())
+    msg = await query.message.reply_text(Q_ENERGY, reply_markup=energy_keyboard())
+    _remember_question_msg(context, msg)
     return ENERGY
 
 
 async def energy_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return ENERGY
     value = int(query.data.split(":")[1])
     context.user_data["survey"]["energy"] = value
     await query.edit_message_text(f"{Q_ENERGY}\n\nВыбрано: {value}")
@@ -433,7 +559,10 @@ async def _after_base_scales(
         await target.reply_text(SKIP_SLEEP_TODAY)
         return await _ask_medication_or_skip(update, context)
 
-    await target.reply_text(Q_SLEEP_DURATION, reply_markup=sleep_duration_keyboard())
+    msg = await target.reply_text(
+        Q_SLEEP_DURATION, reply_markup=sleep_duration_keyboard()
+    )
+    _remember_question_msg(context, msg)
     return SLEEP_DURATION
 
 
@@ -451,7 +580,8 @@ async def _ask_medication_or_skip(
         await target.reply_text(SKIP_MEDICATION_TODAY)
         return await _next_optional_or_comment(update, context)
 
-    await target.reply_text(Q_MEDICATION, reply_markup=medication_keyboard())
+    msg = await target.reply_text(Q_MEDICATION, reply_markup=medication_keyboard())
+    _remember_question_msg(context, msg)
     return MEDICATION
 
 
@@ -472,9 +602,10 @@ async def _next_optional_or_comment(
     code = step["code"]
     title = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
     question_text, options = options_for(code, title)
-    await target.reply_text(
+    msg = await target.reply_text(
         question_text, reply_markup=optional_question_keyboard(options)
     )
+    _remember_question_msg(context, msg)
     return OPTIONAL_Q
 
 
@@ -489,7 +620,8 @@ async def _next_custom_or_comment(
     idx: int = survey.get("custom_idx", 0)
 
     if idx >= len(customs):
-        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        msg = await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        _remember_question_msg(context, msg)
         return COMMENT
 
     q = customs[idx]
@@ -497,13 +629,19 @@ async def _next_custom_or_comment(
     qtype = q["type"]
 
     if qtype == "scale_0_5":
-        await target.reply_text(
+        msg = await target.reply_text(
             f"{text}\n\nВыберите значение от 0 до 5.",
             reply_markup=cq_scale_0_5_keyboard(),
         )
+        _remember_question_msg(context, msg)
     elif qtype == "boolean":
-        await target.reply_text(text, reply_markup=cq_boolean_keyboard())
+        msg = await target.reply_text(text, reply_markup=cq_boolean_keyboard())
+        _remember_question_msg(context, msg)
     elif qtype == "text":
+        # У text-вопроса нет клавиатуры — ответ придёт текстом. Сбрасываем
+        # q_msg_id, чтобы стейл-кнопка прошлого keyboard-вопроса не считалась
+        # «текущей».
+        survey["q_msg_id"] = None
         await target.reply_text(f"Опишите коротко:\n«{text}»")
     else:
         # неизвестный тип — пропускаем
@@ -530,7 +668,8 @@ async def custom_question_step(
     if idx >= len(customs):
         # Гонка — просто переходим к комментарию.
         target = update.callback_query.message if update.callback_query else update.message
-        await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        msg = await target.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        _remember_question_msg(context, msg)
         return COMMENT
 
     q = customs[idx]
@@ -539,6 +678,8 @@ async def custom_question_step(
     if update.callback_query is not None:
         query = update.callback_query
         await query.answer()
+        if _is_stale_press(update, context):
+            return CUSTOM_Q
         data = query.data
         if qtype == "scale_0_5" and data.startswith("cqa:scale:"):
             try:
@@ -613,6 +754,8 @@ async def optional_question_step(
     """
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return OPTIONAL_Q
     try:
         choice_idx = int(query.data.split(":")[1])
     except (ValueError, IndexError):
@@ -623,7 +766,10 @@ async def optional_question_step(
     plan: list[dict] = survey.get("optional_plan", [])
     if idx >= len(plan):
         # Из-за гонок — просто переходим к комментарию.
-        await query.message.reply_text(Q_COMMENT, reply_markup=comment_skip_keyboard())
+        msg = await query.message.reply_text(
+            Q_COMMENT, reply_markup=comment_skip_keyboard()
+        )
+        _remember_question_msg(context, msg)
         return COMMENT
 
     step = plan[idx]
@@ -649,10 +795,11 @@ async def optional_question_step(
                 )
             except Exception:
                 pass
-            await query.message.reply_text(
+            msg = await query.message.reply_text(
                 PHYSICAL_ACTIVITY_DURATION_QUESTION,
                 reply_markup=physical_activity_duration_keyboard(),
             )
+            _remember_question_msg(context, msg)
             return PHYS_ACT_DURATION
         else:
             # "Нет" — записываем JSON и идём дальше.
@@ -712,6 +859,8 @@ async def physical_activity_duration_step(
     и продолжает опрос."""
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return PHYS_ACT_DURATION
     survey = context.user_data["survey"]
     pending = survey.get("pa_pending")
     if not pending:
@@ -753,14 +902,17 @@ async def sleep_duration_step(
 ) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return SLEEP_DURATION
     key = query.data.split(":", 1)[1]
     context.user_data["survey"]["sleep_duration_category"] = key
     await query.edit_message_text(
         f"{Q_SLEEP_DURATION}\n\nВыбрано: {SLEEP_DURATION_LABELS.get(key, key)}"
     )
-    await query.message.reply_text(
+    msg = await query.message.reply_text(
         Q_SLEEP_QUALITY, reply_markup=sleep_quality_keyboard()
     )
+    _remember_question_msg(context, msg)
     return SLEEP_QUALITY
 
 
@@ -769,15 +921,18 @@ async def sleep_quality_step(
 ) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return SLEEP_QUALITY
     key = query.data.split(":", 1)[1]
     context.user_data["survey"]["sleep_quality"] = key
     await query.edit_message_text(
         f"{Q_SLEEP_QUALITY}\n\nВыбрано: {SLEEP_QUALITY_LABELS.get(key, key)}"
     )
     selected: set[str] = context.user_data["survey"]["sleep_problems"]
-    await query.message.reply_text(
+    msg = await query.message.reply_text(
         Q_SLEEP_PROBLEMS, reply_markup=sleep_problems_keyboard(selected)
     )
+    _remember_question_msg(context, msg)
     return SLEEP_PROBLEMS
 
 
@@ -786,6 +941,8 @@ async def sleep_problems_step(
 ) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return SLEEP_PROBLEMS
     key = query.data.split(":", 1)[1]
     selected: set[str] = context.user_data["survey"]["sleep_problems"]
 
@@ -816,6 +973,8 @@ async def medication_step(
 ) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return MEDICATION
     key = query.data.split(":", 1)[1]
     context.user_data["survey"]["medication_taken"] = key
     await query.edit_message_text(
@@ -840,6 +999,8 @@ async def comment_skip_step(
 ) -> int:
     query = update.callback_query
     await query.answer()
+    if _is_stale_press(update, context):
+        return COMMENT
     context.user_data["survey"]["comment"] = None
     await query.edit_message_text(f"{Q_COMMENT}\n\nПропущено.")
     return await _finish_survey(update, context)
@@ -1075,5 +1236,9 @@ def build_survey_conversation() -> ConversationHandler:
         fallbacks=[CommandHandler("cancel", cancel_command)],
         name="survey_conversation",
         persistent=False,
-        allow_reentry=False,
+        # allow_reentry=True: кнопка «Заполнить опрос» из планового напоминания
+        # должна срабатывать, даже если пользователь застрял в незавершённом
+        # диалоге. С False entry_points игнорировались, пока пользователь «внутри»
+        # conversation, и кнопка молча не реагировала (см. survey_start_callback).
+        allow_reentry=True,
     )

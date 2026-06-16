@@ -6,6 +6,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from bot.constants import (
+    ABANDONED_STATUS,
     COMPLETED_STATUS,
     PENDING_STATUS,
     REMINDER_SENT_STATUS,
@@ -274,6 +275,21 @@ def mark_pending_completed(session: Session, user_id: int) -> None:
     pending = latest_pending(session, user_id)
     if pending is not None:
         pending.status = COMPLETED_STATUS
+
+
+def mark_pending_abandoned(session: Session, user_id: int) -> int | None:
+    """Помечает активный pending как 'abandoned' и возвращает его id.
+
+    Вызывается, когда пользователь перезапускает опрос кнопкой напоминания,
+    не завершив предыдущий. Снимает старый pending из активных статусов, чтобы
+    latest_pending его больше не выбирал, а вызывающий — снял reminder-джобу.
+    Возвращает id (для отмены джобы) или None, если активного pending нет.
+    """
+    pending = latest_pending(session, user_id)
+    if pending is None:
+        return None
+    pending.status = ABANDONED_STATUS
+    return pending.id
 
 
 def mark_pending_reminder_sent(session: Session, pending_id: int) -> None:
