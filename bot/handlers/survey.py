@@ -336,14 +336,23 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def survey_start_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Запуск опроса по кнопке из планового уведомления."""
+    """Запуск опроса по кнопке из планового уведомления.
+
+    Кнопка из напоминания всегда начинает новый опрос: если пользователь
+    застрял в незавершённом диалоге (бросил прошлый опрос на полушаге), мы
+    молча прерываем его и стартуем заново. Раньше при allow_reentry=False
+    застрявший пользователь не мог запустить опрос вовсе — кнопка «не
+    работала». _init_survey пересоздаёт survey-state с нуля, так что сбросить
+    старый безопасно. Защита _is_active_survey остаётся на ручном /add.
+    """
     query = update.callback_query
     await query.answer()
     if _is_active_survey(context):
-        await query.message.reply_text(
-            UNFINISHED_SURVEY, reply_markup=unfinished_survey_keyboard()
+        logger.info(
+            "Кнопка опроса из напоминания: прерываю незавершённый диалог tg=%s",
+            update.effective_user.id,
         )
-        return ConversationHandler.END
+        context.user_data.pop("survey", None)
     survey_slot = _parse_slot_from_callback(query.data)
     # Источник: если есть pending в статусе reminder_sent — это reminder.
     source = SOURCE_SCHEDULED
@@ -1075,5 +1084,9 @@ def build_survey_conversation() -> ConversationHandler:
         fallbacks=[CommandHandler("cancel", cancel_command)],
         name="survey_conversation",
         persistent=False,
-        allow_reentry=False,
+        # allow_reentry=True: кнопка «Заполнить опрос» из планового напоминания
+        # должна срабатывать, даже если пользователь застрял в незавершённом
+        # диалоге. С False entry_points игнорировались, пока пользователь «внутри»
+        # conversation, и кнопка молча не реагировала (см. survey_start_callback).
+        allow_reentry=True,
     )
