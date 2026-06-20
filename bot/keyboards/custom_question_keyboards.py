@@ -3,6 +3,7 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import CustomQuestion
+from bot.texts import BTN_SKIP
 from bot.services.custom_question_service import (
     EVERY_N_DAYS_MAX,
     EVERY_N_DAYS_MIN,
@@ -166,18 +167,33 @@ def cq_every_n_days_keyboard(
 # ---------- ответы в опросе ----------
 
 def cq_scale_0_5_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки 0..5 для scale_0_5 ответа. Префикс cqa: (custom question answer)."""
+    """Кнопки 0..5 для scale_0_5 ответа. Префикс cqa: (custom question answer).
+    Внизу — «Пропустить» (cqa:skip): вопрос можно проигнорировать без ответа."""
     buttons = [
         InlineKeyboardButton(str(i), callback_data=f"cqa:scale:{i}")
         for i in range(6)
     ]
-    return InlineKeyboardMarkup([buttons])
+    return InlineKeyboardMarkup([
+        buttons,
+        [InlineKeyboardButton(BTN_SKIP, callback_data="cqa:skip")],
+    ])
 
 
 def cq_boolean_keyboard() -> InlineKeyboardMarkup:
+    """Да/Нет для boolean. Внизу — «Пропустить» (cqa:skip)."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Да", callback_data="cqa:bool:1"),
             InlineKeyboardButton("Нет", callback_data="cqa:bool:0"),
         ],
+        [InlineKeyboardButton(BTN_SKIP, callback_data="cqa:skip")],
+    ])
+
+
+def cq_text_skip_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка «Пропустить» для текстового custom-вопроса (cqa:skip).
+    У text-вопроса нет клавиатуры с вариантами — ответ приходит сообщением, —
+    поэтому пропуск выносим отдельной inline-кнопкой под просьбой описать."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(BTN_SKIP, callback_data="cqa:skip")],
     ])

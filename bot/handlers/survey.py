@@ -48,6 +48,7 @@ from bot.database import session_scope
 from bot.keyboards.custom_question_keyboards import (
     cq_boolean_keyboard,
     cq_scale_0_5_keyboard,
+    cq_text_skip_keyboard,
 )
 from bot.keyboards.survey_keyboards import (
     anxiety_keyboard,
@@ -638,11 +639,14 @@ async def _next_custom_or_comment(
         msg = await target.reply_text(text, reply_markup=cq_boolean_keyboard())
         _remember_question_msg(context, msg)
     elif qtype == "text":
-        # У text-вопроса нет клавиатуры — ответ придёт текстом. Сбрасываем
-        # q_msg_id, чтобы стейл-кнопка прошлого keyboard-вопроса не считалась
-        # «текущей».
-        survey["q_msg_id"] = None
-        await target.reply_text(f"Опишите коротко:\n«{text}»")
+        # У text-вопроса ответ придёт сообщением, но «Пропустить» выносим
+        # отдельной inline-кнопкой (cqa:skip). q_msg_id запоминаем — иначе
+        # стейл-гард отверг бы нажатие на эту кнопку как «не текущее».
+        msg = await target.reply_text(
+            f"Опишите коротко:\n«{text}»",
+            reply_markup=cq_text_skip_keyboard(),
+        )
+        _remember_question_msg(context, msg)
     else:
         # неизвестный тип — пропускаем
         logger.warning("Unknown custom answer_type: %s, skip", qtype)
@@ -681,6 +685,15 @@ async def custom_question_step(
         if _is_stale_press(update, context):
             return CUSTOM_Q
         data = query.data
+        # «Пропустить» — общий для всех типов custom-вопросов (scale/bool/text).
+        # Ответ не сохраняем, просто двигаемся к следующему вопросу.
+        if data == "cqa:skip":
+            try:
+                await query.edit_message_text(f"{q['text']}\n\nПропущено.")
+            except Exception:
+                pass
+            survey["custom_idx"] = idx + 1
+            return await _next_custom_or_comment(update, context)
         if qtype == "scale_0_5" and data.startswith("cqa:scale:"):
             try:
                 value = int(data.split(":")[2])
@@ -756,10 +769,6 @@ async def optional_question_step(
     await query.answer()
     if _is_stale_press(update, context):
         return OPTIONAL_Q
-    try:
-        choice_idx = int(query.data.split(":")[1])
-    except (ValueError, IndexError):
-        return OPTIONAL_Q
 
     survey = context.user_data["survey"]
     idx: int = survey.get("optional_idx", 0)
@@ -775,6 +784,24 @@ async def optional_question_step(
     step = plan[idx]
     code = step["code"]
     target_date_iso = step["target_date"]
+
+    # «Пропустить» — пользователь не знает, как ответить. Ничего не сохраняем
+    # (ни в state, ни в БД), просто двигаемся к следующему шагу. Для
+    # physical_activity это пропускает весь вопрос, даже не дойдя до длительности.
+    if query.data == "opt:skip":
+        question_text = QUESTION_DEFINITIONS.get(code, {}).get("question_text", code)
+        survey["optional_idx"] = idx + 1
+        try:
+            await query.edit_message_text(f"{question_text}\n\nПропущено.")
+        except Exception:
+            pass
+        return await _next_optional_or_comment(update, context)
+
+    try:
+        choice_idx = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        return OPTIONAL_Q
+
     _, options = options_for(code)
     if not (0 <= choice_idx < len(options)):
         return OPTIONAL_Q
@@ -871,6 +898,21 @@ async def physical_activity_duration_step(
         duration_key = query.data.split(":", 1)[1]
     except IndexError:
         return PHYS_ACT_DURATION
+
+    # «Пропустить» на шаге длительности — ответили «Да», но длительность
+    # указывать не хотят. Сам ответ «Да» ещё не записан (был только pa_pending),
+    # поэтому просто сбрасываем pending и двигаемся дальше — вопрос пропущен.
+    if duration_key == "skip":
+        survey["pa_pending"] = None
+        survey["optional_idx"] = survey.get("optional_idx", 0) + 1
+        try:
+            await query.edit_message_text(
+                f"{PHYSICAL_ACTIVITY_DURATION_QUESTION}\n\nПропущено."
+            )
+        except Exception:
+            pass
+        return await _next_optional_or_comment(update, context)
+
     if duration_key not in PHYSICAL_ACTIVITY_DURATION_LABELS:
         return PHYS_ACT_DURATION
 
@@ -1214,7 +1256,9 @@ def build_survey_conversation() -> ConversationHandler:
                 CallbackQueryHandler(medication_step, pattern=r"^med:")
             ],
             OPTIONAL_Q: [
-                CallbackQueryHandler(optional_question_step, pattern=r"^opt:\d+$")
+                CallbackQueryHandler(
+                    optional_question_step, pattern=r"^opt:(\d+|skip)$"
+                )
             ],
             PHYS_ACT_DURATION: [
                 CallbackQueryHandler(
@@ -1224,7 +1268,7 @@ def build_survey_conversation() -> ConversationHandler:
             CUSTOM_Q: [
                 CallbackQueryHandler(
                     custom_question_step,
-                    pattern=r"^cqa:(scale:\d+|bool:[01])$",
+                    pattern=r"^cqa:(scale:\d+|bool:[01]|skip)$",
                 ),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, custom_question_step),
             ],
