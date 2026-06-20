@@ -11,6 +11,7 @@ from bot.constants_questions import (
     PHYSICAL_ACTIVITY_DURATION_OPTIONS,
     SURVEY_SLOT_SINGLE,
 )
+from bot.texts import BTN_SKIP
 
 
 def scale_keyboard(prefix: str, max_value: int) -> InlineKeyboardMarkup:
@@ -118,19 +119,24 @@ def optional_question_keyboard(options: list[str]) -> InlineKeyboardMarkup:
 
     Кнопки идут по одной в ряд — подписи у некоторых вопросов длинные.
     Поддерживает любое число вариантов (4 у stress_events/spending, 5 у шкал,
-    2 у physical_activity done?).
+    2 у physical_activity done?). Внизу — «Пропустить» (opt:skip): если юзер не
+    знает, как ответить, вопрос можно проигнорировать — ответ не сохраняется.
     """
     rows = [
         [InlineKeyboardButton(label, callback_data=f"opt:{idx}")]
         for idx, label in enumerate(options)
     ]
+    rows.append([InlineKeyboardButton(BTN_SKIP, callback_data="opt:skip")])
     return InlineKeyboardMarkup(rows)
 
 
 def physical_activity_duration_keyboard() -> InlineKeyboardMarkup:
-    """Длительность физ. активности — 5 вариантов, по одному в ряд."""
+    """Длительность физ. активности — 5 вариантов, по одному в ряд.
+    Внизу — «Пропустить» (pa_dur:skip): если ответили «Да», но длительность
+    указывать не хотят, вопрос целиком пропускается без сохранения."""
     rows = [
         [InlineKeyboardButton(label, callback_data=f"pa_dur:{key}")]
         for key, label in PHYSICAL_ACTIVITY_DURATION_OPTIONS
     ]
+    rows.append([InlineKeyboardButton(BTN_SKIP, callback_data="pa_dur:skip")])
     return InlineKeyboardMarkup(rows)
